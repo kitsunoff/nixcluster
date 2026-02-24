@@ -38,12 +38,12 @@ in
           secretsDir = "nix8s/secrets";
           clusterSshKey = "${secretsDir}/${clusterName}_ssh";
 
-          # Determine which SSH key to use
-          sshKeyArg =
+          # Build SSH key args (empty if using ssh-agent)
+          sshKeyArgs =
             if sshKeyFile != null then
-              "-i ${sshKeyFile}"
+              [ "-i" sshKeyFile ]
             else
-              "-i $SSH_KEY";
+              [ ];
 
         in
         pkgs.writeShellApplication {
@@ -56,39 +56,46 @@ in
             TARGET_USER="${sshUser}"
             SSH_PORT="${toString sshPort}"
             FLAKE_REF="''${1:-.}"
-            SSH_KEY=""
+            SSH_KEY_ARGS=()
 
-            # Find SSH key
+            # Use explicit key file if configured, otherwise try cluster key, otherwise ssh-agent
+            ${if sshKeyFile != null then ''
+            SSH_KEY_ARGS=("${lib.concatStringsSep "\" \"" sshKeyArgs}")
+            '' else ''
             if [[ -f "${clusterSshKey}" ]]; then
-              SSH_KEY="${clusterSshKey}"
-            elif [[ -f "$HOME/.ssh/id_ed25519" ]]; then
-              SSH_KEY="$HOME/.ssh/id_ed25519"
-            elif [[ -f "$HOME/.ssh/id_rsa" ]]; then
-              SSH_KEY="$HOME/.ssh/id_rsa"
+              SSH_KEY_ARGS=(-i "${clusterSshKey}")
             fi
+            # If no key found, ssh-agent will be used automatically
+            ''}
 
             echo "========================================"
             echo " nixos-anywhere Deploy"
             echo " Node: ${nodeName}"
             echo " Target: $TARGET_USER@$TARGET_IP:$SSH_PORT"
             echo " Flake: $FLAKE_REF#${nodeName}"
+            ${if sshKeyFile == null then ''echo " SSH: ''${SSH_KEY_ARGS[*]:-ssh-agent}"'' else ''echo " SSH: ${sshKeyFile}"''}
             echo "========================================"
             echo ""
 
+            # Build nixos-anywhere command
+            NIXOS_ANYWHERE_ARGS=(
+              --flake "$FLAKE_REF#${nodeName}"
+              --ssh-port "$SSH_PORT"
+            )
+
+            # Add SSH key args if present
+            if [[ ''${#SSH_KEY_ARGS[@]} -gt 0 ]]; then
+              NIXOS_ANYWHERE_ARGS+=("''${SSH_KEY_ARGS[@]}")
+            fi
+
+            NIXOS_ANYWHERE_ARGS+=("$TARGET_USER@$TARGET_IP")
+
             # Check if nixos-anywhere is available
             if ! command -v nixos-anywhere &>/dev/null; then
-              echo "Installing nixos-anywhere..."
-              nix run github:nix-community/nixos-anywhere -- \
-                --flake "$FLAKE_REF#${nodeName}" \
-                --ssh-port "$SSH_PORT" \
-                ${sshKeyArg} \
-                "$TARGET_USER@$TARGET_IP"
+              echo "Running via nix run..."
+              nix run github:nix-community/nixos-anywhere -- "''${NIXOS_ANYWHERE_ARGS[@]}"
             else
-              nixos-anywhere \
-                --flake "$FLAKE_REF#${nodeName}" \
-                --ssh-port "$SSH_PORT" \
-                ${sshKeyArg} \
-                "$TARGET_USER@$TARGET_IP"
+              nixos-anywhere "''${NIXOS_ANYWHERE_ARGS[@]}"
             fi
 
             echo ""
@@ -97,7 +104,7 @@ in
             echo "========================================"
             echo ""
             echo "Connect with:"
-            echo "  ssh ${sshKeyArg} $TARGET_USER@$TARGET_IP"
+            echo "  ssh ''${SSH_KEY_ARGS[*]} $TARGET_USER@$TARGET_IP"
           '';
         };
 
@@ -137,15 +144,17 @@ in
             set -euo pipefail
 
             FLAKE_REF="''${1:-.}"
-            SSH_KEY=""
-            PARALLEL="''${PARALLEL:-false}"
+            SSH_KEY_ARGS=()
 
-            # Find SSH key
+            # Use explicit key file if configured, otherwise try cluster key, otherwise ssh-agent
+            ${if sshKeyFile != null then ''
+            SSH_KEY_ARGS=(-i "${sshKeyFile}")
+            '' else ''
             if [[ -f "${clusterSshKey}" ]]; then
-              SSH_KEY="${clusterSshKey}"
-            elif [[ -f "$HOME/.ssh/id_ed25519" ]]; then
-              SSH_KEY="$HOME/.ssh/id_ed25519"
+              SSH_KEY_ARGS=(-i "${clusterSshKey}")
             fi
+            # If no key found, ssh-agent will be used automatically
+            ''}
 
             echo "========================================"
             echo " nixos-anywhere Cluster Deploy"
@@ -170,7 +179,7 @@ in
             FIRST_SERVER_IP="${cluster.members.${firstServerName}.ip}"
             for i in $(seq 1 60); do
               if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-                   ''${SSH_KEY:+-i "$SSH_KEY"} \
+                   "''${SSH_KEY_ARGS[@]}" \
                    ${sshUser}@"$FIRST_SERVER_IP" \
                    "kubectl get nodes" &>/dev/null; then
                 echo "First server is ready!"
