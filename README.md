@@ -14,7 +14,11 @@ nix run .#init-secrets
 # Generate cluster secrets (k3s tokens + SSH keypair)
 nix run .#gen-secrets -- dev
 
-# Build and deploy via PXE
+# Deploy via nixos-anywhere (recommended)
+# Boot target machines with any Linux, then:
+nix run .#dev-deploy
+
+# Or deploy via PXE (bare metal network boot)
 nix run .#dev-pxe-server
 
 # After nodes are installed, fetch kubeconfig
@@ -103,6 +107,8 @@ nix flake show
 ```
 
 - `nixosConfigurations.<cluster>-<member>` — NixOS configurations for each node
+- `packages.<cluster>-deploy` — Deploy entire cluster via nixos-anywhere
+- `packages.<cluster>-<member>-deploy` — Deploy single node via nixos-anywhere
 - `packages.<cluster>-upgrade` — Rolling upgrade entire cluster
 - `packages.<cluster>-<member>-upgrade` — Upgrade single node
 - `packages.<cluster>-helm-deploy` — Deploy Helm charts
@@ -121,13 +127,14 @@ Use individual modules for granular control:
 ```nix
 {
   imports = [
-    nix8s.flakeModules.core        # nix8s options
-    nix8s.flakeModules.outputs     # nixosConfigurations
-    nix8s.flakeModules.pxe         # PXE provisioning
-    nix8s.flakeModules.helm        # Helm deployments
-    nix8s.flakeModules.manifests   # Raw manifests
-    nix8s.flakeModules.upgrade     # Rolling upgrades
-    nix8s.flakeModules.devshell    # devShells
+    nix8s.flakeModules.core           # nix8s options
+    nix8s.flakeModules.outputs        # nixosConfigurations
+    nix8s.flakeModules.nixos-anywhere # nixos-anywhere provisioning
+    nix8s.flakeModules.pxe            # PXE provisioning
+    nix8s.flakeModules.helm           # Helm deployments
+    nix8s.flakeModules.manifests      # Raw manifests
+    nix8s.flakeModules.upgrade        # Rolling upgrades
+    nix8s.flakeModules.devshell       # devShells
     nix8s.flakeModules.gen-secrets      # gen-secrets, init-secrets apps
     nix8s.flakeModules.fetch-kubeconfig # fetch-kubeconfig app
     nix8s.flakeModules.systems          # supported systems
@@ -331,7 +338,44 @@ nix run .#prod-upgrade
 nix run .#prod-server1-upgrade
 ```
 
-## PXE Provisioning
+## Provisioning Methods
+
+### nixos-anywhere (Recommended)
+
+Deploy nodes remotely via SSH to any Linux system:
+
+```nix
+# nix8s/provisioning.nix
+{ ... }:
+{
+  nix8s.provisioning = {
+    nixos-anywhere = {
+      enable = true;
+      ssh = {
+        user = "root";
+        keyFile = "~/.ssh/id_ed25519";
+        port = 22;
+      };
+    };
+  };
+}
+```
+
+```bash
+# Deploy single node
+nix run .#prod-server1-deploy
+
+# Deploy entire cluster (first server first, then rest)
+nix run .#prod-deploy
+```
+
+Requirements:
+
+- Target machine must be booted into any Linux (e.g., NixOS installer ISO, Ubuntu live, etc.)
+- SSH access to root (or sudo user)
+- nixos-anywhere will partition disks and install NixOS automatically
+
+### PXE Provisioning
 
 Boot nodes via network with automatic MAC-based routing:
 

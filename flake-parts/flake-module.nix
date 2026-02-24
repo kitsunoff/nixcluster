@@ -17,6 +17,7 @@
         ./systems.nix
         ./apps/gen-secrets.nix
         ./apps/fetch-kubeconfig.nix
+        ./nixos-anywhere.nix
       ];
     };
 
@@ -32,5 +33,6 @@
     systems = ./systems.nix;
     gen-secrets = ./apps/gen-secrets.nix;
     fetch-kubeconfig = ./apps/fetch-kubeconfig.nix;
+    nixos-anywhere = ./nixos-anywhere.nix;
   };
 }
