@@ -351,11 +351,9 @@ Deploy nodes remotely via SSH to any Linux system:
   nix8s.provisioning = {
     nixos-anywhere = {
       enable = true;
-      ssh = {
-        user = "root";
-        keyFile = "~/.ssh/id_ed25519";
-        port = 22;
-      };
+      ssh.user = "root";
+      # ssh.keyFile = "/path/to/key";  # Optional, uses ssh-agent by default
+      # ssh.port = 22;
     };
   };
 }
