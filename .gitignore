@@ -1,1 +1,3 @@
+# Private keys - NEVER commit
 secrets/*.age.key
+secrets/*_ssh
