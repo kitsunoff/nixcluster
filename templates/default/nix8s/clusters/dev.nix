@@ -3,11 +3,27 @@
 
 {
   nix8s.clusters.dev = {
-    # Optional: override k3s package
-    # k3s.package = pkgs.k3s_1_30;
+    # k3s configuration
+    k3s = {
+      enable = true;
+      servers = [ "server" ];
+      agents = [ "agent" ];
+      # Optional: override k3s package
+      # package = pkgs.k3s_1_30;
+    };
 
+    # SOPS-encrypted secrets
     # Generate with: nix run .#gen-secrets -- dev
-    secrets = builtins.fromJSON (builtins.readFile ../secrets/dev.json);
+    sops = {
+      enable = true;
+      secretsFile = ../secrets/dev.yaml;
+      # Age key must be deployed to /etc/age/key.txt on nodes
+      # Use nixos-anywhere --extra-files or manual deployment
+    };
+
+    # SSH public key for node access (read from encrypted secrets at build time)
+    # This is safe because it's a public key
+    secrets.sshPubKey = builtins.readFile ../secrets/dev_ssh.pub;
 
     # Helm packages (optional)
     # helmPackages = {

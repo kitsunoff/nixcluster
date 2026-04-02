@@ -1,12 +1,21 @@
-# Base NixOS configuration for all cluster nodes
+# Base NixOS configuration for all nodes
 { config, lib, pkgs, nix8s, ... }:
 
 let
+  nodeName = nix8s.nodeName;
   nodeConfig = nix8s.nodeConfig;
-  member = nix8s.member;
+
+  # Cluster context (may be null for standalone nodes)
   cluster = nix8s.cluster;
   clusterName = nix8s.clusterName;
   memberName = nix8s.memberName;
+  member = nix8s.member or { };
+
+  # Determine hostname
+  hostname =
+    if clusterName != null && memberName != null
+    then "${clusterName}-${memberName}"
+    else nodeName;
 
   # Installer/discovery modes don't mount disks
   isInstaller = nix8s.isInstaller or false;
@@ -14,53 +23,15 @@ let
   isNetboot = isInstaller || isDiscovery;
 
   # SSH public key from cluster secrets (for node access)
-  sshPubKey = cluster.secrets.sshPubKey or null;
-
-  # Cozystack/LINSTOR config (cluster-level enables, node-level configures disks)
-  cozystackCfg = cluster.cozystack or { };
-  linstorClusterCfg = cozystackCfg.linstor or { };
-  linstorEnabled = linstorClusterCfg.enable or false;
-
-  # Node-level LINSTOR disk config
-  nodeLinstorCfg = nodeConfig.linstor or { };
-  linstorDisk = nodeLinstorCfg.disk or null;              # single dedicated disk
-  linstorDisks = nodeLinstorCfg.disks or [ ];             # multiple dedicated disks
-  linstorPartitionFromRoot = nodeLinstorCfg.partitionFromRoot or false;  # use remaining space on system disk
-
-  # Determine storage mode:
-  # 1. linstor.disks = [ "/dev/sdb" "/dev/sdc" ] — multiple dedicated disks
-  # 2. linstor.disk = "/dev/sdb" — single dedicated disk
-  # 3. linstor.partitionFromRoot = true — partition from system disk (requires install.rootSize)
-  hasLinstorDisks = linstorDisks != [ ];
-  hasLinstorDisk = linstorDisk != null;
-  hasLinstorPartition = linstorEnabled && linstorPartitionFromRoot && !hasLinstorDisk && !hasLinstorDisks;
+  sshPubKey =
+    if cluster != null
+    then cluster.secrets.sshPubKey or null
+    else null;
 
   # Simple install mode: generate disko config from install.disk
-  # Supports optional LINSTOR partition when cozystack.linstor.enable = true
   simpleDisko = disk: swapSize:
     let
       hasSwap = swapSize != null;
-
-      # Generate disko config for a single LINSTOR disk
-      mkLinstorDisk = name: device: {
-        type = "disk";
-        inherit device;
-        content = {
-          type = "gpt";
-          partitions = {
-            linstor = {
-              size = "100%";
-              # No content — raw partition for LINSTOR/LVM
-            };
-          };
-        };
-      };
-
-      # Multiple disks: linstor0, linstor1, etc.
-      linstorDisksAttrs = lib.listToAttrs (lib.imap0 (i: device:
-        lib.nameValuePair "linstor${toString i}" (mkLinstorDisk "linstor${toString i}" device)
-      ) linstorDisks);
-
     in
     {
       devices.disk.main = {
@@ -89,30 +60,16 @@ let
             };
           } // {
             root = {
-              # If LINSTOR partition needed, use fixed size; otherwise use all remaining space
-              size = if hasLinstorPartition then (nodeConfig.install.rootSize or "100G") else "100%";
+              size = "100%";
               content = {
                 type = "filesystem";
                 format = "ext4";
                 mountpoint = "/";
               };
             };
-          } // lib.optionalAttrs hasLinstorPartition {
-            linstor = {
-              size = "100%";  # Use all remaining space after root
-              # No content — raw partition for LINSTOR/LVM
-            };
           };
         };
       };
-    }
-    # Single dedicated LINSTOR disk
-    // lib.optionalAttrs hasLinstorDisk {
-      devices.disk.linstor = mkLinstorDisk "linstor" linstorDisk;
-    }
-    # Multiple dedicated LINSTOR disks
-    // lib.optionalAttrs hasLinstorDisks {
-      devices.disk = linstorDisksAttrs;
     };
 
   # Determine disko config: either from install.disk (simple) or disko (custom)
@@ -129,7 +86,7 @@ in
   disko.devices = lib.mkIf (!isNetboot) (diskoConfig.devices or { });
 
   # Hostname
-  networking.hostName = "${clusterName}-${memberName}";
+  networking.hostName = hostname;
 
   # Boot loader (EFI) - skip for netboot images
   boot.loader = lib.mkIf (!isNetboot) {
@@ -147,12 +104,7 @@ in
     firewall = {
       enable = true;
       allowedTCPPorts = [
-        22    # SSH
-        6443  # Kubernetes API
-        10250 # Kubelet
-      ];
-      allowedUDPPorts = [
-        8472  # Flannel VXLAN
+        22 # SSH
       ];
     };
   };

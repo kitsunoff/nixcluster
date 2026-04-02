@@ -7,6 +7,10 @@
 let
   cfg = config.nix8s;
 
+  # Helper: get k3s servers for ordering (if k3s extension is used)
+  getK3sServers = cluster: cluster.k3s.servers or [ ];
+  getK3sAgents = cluster: cluster.k3s.agents or [ ];
+
 in
 {
   perSystem = { pkgs, ... }:
@@ -160,14 +164,21 @@ in
           sshOpts = upgradeCfg.sshOpts or "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null";
           pauseBetweenNodes = upgradeCfg.pauseBetweenNodes or "10";
 
-          # Sort members: agents first, then servers (or reverse if serversFirst)
-          servers = lib.filterAttrs (_: m: m.role == "server") members;
-          agents = lib.filterAttrs (_: m: m.role == "agent") members;
+          # Sort members by k3s role if k3s is enabled (agents first, then servers)
+          # Otherwise, just alphabetically
+          k3sServers = getK3sServers cluster;
+          k3sAgents = getK3sAgents cluster;
+          allMemberNames = lib.attrNames members;
+
+          # Members not in k3s (neither server nor agent)
+          otherMembers = lib.filter
+            (name: !(lib.elem name k3sServers) && !(lib.elem name k3sAgents))
+            allMemberNames;
 
           orderedMembers =
             if serversFirst
-            then (lib.attrNames servers) ++ (lib.attrNames agents)
-            else (lib.attrNames agents) ++ (lib.attrNames servers);
+            then k3sServers ++ k3sAgents ++ otherMembers
+            else k3sAgents ++ k3sServers ++ otherMembers;
 
           # Generate upgrade commands for each member
           memberUpgrades = lib.concatMapStringsSep "\n" (memberName:

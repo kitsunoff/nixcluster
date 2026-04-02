@@ -8,31 +8,22 @@
       imports = [
         ./core.nix
         ./outputs.nix
-        ./pxe.nix
-        ./helm.nix
-        ./manifests.nix
-        ./upgrade.nix
-        ./cozystack.nix
         ./devshell.nix
-        ./systems.nix
-        ./apps/gen-secrets.nix
-        ./apps/fetch-kubeconfig.nix
+        ./nix8sctl
         ./nixos-anywhere.nix
+        # Extensions
+        ./extensions/k3s.nix
       ];
     };
 
     # Individual modules
     core = ./core.nix;
     outputs = ./outputs.nix;
-    pxe = ./pxe.nix;
-    helm = ./helm.nix;
-    manifests = ./manifests.nix;
-    upgrade = ./upgrade.nix;
-    cozystack = ./cozystack.nix;
     devshell = ./devshell.nix;
-    systems = ./systems.nix;
-    gen-secrets = ./apps/gen-secrets.nix;
-    fetch-kubeconfig = ./apps/fetch-kubeconfig.nix;
+    nix8sctl = ./nix8sctl;
     nixos-anywhere = ./nixos-anywhere.nix;
+
+    # Extensions
+    k3s = ./extensions/k3s.nix;
   };
 }

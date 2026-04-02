@@ -8,9 +8,20 @@ let
 
   # Get cluster settings
   k3sConfig = cluster.k3s or { };
-  secrets = cluster.secrets;
+  secrets = cluster.secrets or { };
   cozystackCfg = cluster.cozystack or { };
   cozystackEnabled = cozystackCfg.enable or false;
+
+  # SOPS integration
+  sopsCfg = cluster.sops or { };
+  sopsEnabled = sopsCfg.enable or false;
+
+  # Token source: sops secret file or direct value
+  tokenFile =
+    if sopsEnabled
+    then config.sops.secrets."k3s-token".path
+    else secrets.tokenFile or null;
+  tokenValue = secrets.token or null;
 
   # k3s package (can be overridden via cluster.k3s.package)
   k3sPackage = k3sConfig.package or pkgs.k3s;
@@ -80,8 +91,9 @@ in
 
     role = member.role;
 
-    # Token for cluster membership
-    token = secrets.token;
+    # Token for cluster membership — prefer tokenFile over inline token
+    tokenFile = lib.mkIf (tokenFile != null) tokenFile;
+    token = lib.mkIf (tokenFile == null && tokenValue != null) tokenValue;
 
     # Server URL (not needed for first server with --cluster-init)
     serverAddr = lib.mkIf (!isFirstServer) serverUrl;
