@@ -22,10 +22,6 @@ let
   # iPXE assets path
   ipxeAssetsPath = ../assets/ipxe;
 
-  # Path to modules
-  installerModule = ../modules/nixos/installer.nix;
-  discoveryModule = ../modules/nixos/discovery.nix;
-
   # Path to pxe server script
   pxeServerScript = ../scripts/pxe_server.py;
 

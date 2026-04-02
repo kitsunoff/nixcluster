@@ -5,7 +5,6 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     disko.url = "github:nix-community/disko";
     sops-nix.url = "github:Mic92/sops-nix";
-    flake-parts.url = "github:hercules-ci/flake-parts";
 
     disko.inputs.nixpkgs.follows = "nixpkgs";
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
@@ -39,9 +38,6 @@
         cozystack = ./cluster-modules/cozystack.nix;
         pxe = ./cluster-modules/pxe.nix;
       };
-
-      # Export flake-parts module
-      flakeModules.default = ./lib/flakeModule.nix;
 
       # Packages
       packages = forAllSystems ({ pkgs, ... }: {
