@@ -64,26 +64,62 @@ let
       cluster = nix8s.cluster;
       cozyCfg = cluster.cozystack;
 
-      # Get role from member config
-      role = member.k3s.role or null;
+      # Get role from member config (k3s is also NixOS option now)
+      role = config.k3s.role or null;
       isServer = role == "server";
       isAgent = role == "agent";
       isK3sMember = role != null;
 
-      # Storage config
-      storageConfig = member.cozystack.storage or {};
-      storageDisks = storageConfig.disks or [];
-      systemPartition = storageConfig.systemPartition or {};
-      useSystemPartition = systemPartition.enable or false;
-      systemPartitionSize = systemPartition.size or "400G";
-      poolName = storageConfig.poolName or "data";
-      poolType = storageConfig.poolType or "zfs";
+      # Storage config from NixOS options
+      storageConfig = config.cozystack.storage;
+      storageDisks = storageConfig.disks;
+      useSystemPartition = storageConfig.systemPartition.enable;
+      systemPartitionSize = storageConfig.systemPartition.size;
+      poolName = storageConfig.poolName;
+      poolType = storageConfig.poolType;
 
       hasStorage = storageDisks != [] || useSystemPartition;
 
       cozystackFlags = if isServer then cozystackServerFlags else cozystackAgentFlags;
     in
-    lib.mkIf (cozyCfg.enable && isK3sMember) {
+    {
+    # Define NixOS options for cozystack storage
+    options.cozystack.storage = {
+      disks = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = "Dedicated disks for LINSTOR storage pool";
+        example = [ "/dev/sdb" "/dev/nvme0n1" ];
+      };
+
+      systemPartition = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Use a partition on the system disk for LINSTOR storage";
+        };
+
+        size = lib.mkOption {
+          type = lib.types.str;
+          default = "400G";
+          description = "Size of the LINSTOR storage partition";
+        };
+      };
+
+      poolName = lib.mkOption {
+        type = lib.types.str;
+        default = "data";
+        description = "LINSTOR storage pool name";
+      };
+
+      poolType = lib.mkOption {
+        type = lib.types.enum [ "zfs" "lvm" "lvmthin" ];
+        default = "zfs";
+        description = "Storage pool type for LINSTOR";
+      };
+    };
+
+    config = lib.mkIf (cozyCfg.enable && isK3sMember) {
       # Add cozystack flags to k3s extraFlags
       k3s.extraServerFlags = lib.mkIf isServer cozystackServerFlags;
       k3s.extraAgentFlags = lib.mkIf isAgent cozystackAgentFlags;
@@ -138,6 +174,7 @@ let
         ];
       };
     };
+    };  # close NixOS module
 
   # Platform package YAML
   platformPackageYaml = ''
