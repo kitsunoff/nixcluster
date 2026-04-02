@@ -33,6 +33,7 @@
       # Export cluster modules
       clusterModules = {
         core = ./cluster-modules/core.nix;
+        disko = ./cluster-modules/disko.nix;
         k3s = ./cluster-modules/k3s.nix;
         sops = ./cluster-modules/sops.nix;
         cozystack = ./cluster-modules/cozystack.nix;
@@ -70,10 +71,12 @@
       nixosConfigurations.base = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
         modules = [
+          inputs.disko.nixosModules.disko
           inputs.sops-nix.nixosModules.sops
           {
-            boot.loader.grub.device = "/dev/sda";
-            fileSystems."/" = { device = "/dev/sda1"; fsType = "ext4"; };
+            # Disko will manage disk layout, these are fallbacks
+            boot.loader.grub.device = lib.mkDefault "/dev/sda";
+            fileSystems."/" = lib.mkDefault { device = "/dev/sda1"; fsType = "ext4"; };
             system.stateVersion = "24.11";
           }
         ];
@@ -83,6 +86,7 @@
       clusterConfigurations = {
         dev = nix8sLib.mkCluster {
           imports = [
+            self.clusterModules.disko
             self.clusterModules.k3s
             self.clusterModules.sops
             self.clusterModules.cozystack
@@ -90,6 +94,7 @@
           ];
           name = "dev";
 
+          disko.enable = true;
           sops.enable = true;
           k3s.enable = true;
 
