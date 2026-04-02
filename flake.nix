@@ -86,6 +86,7 @@
             self.clusterModules.k3s
             self.clusterModules.sops
             self.clusterModules.cozystack
+            self.clusterModules.pxe
           ];
           name = "dev";
 
@@ -97,21 +98,34 @@
             publishing.host = "cozy.example.com";
           };
 
+          # PXE server for auto-provisioning
+          pxe = {
+            enable = true;
+            interface = "eth0";
+            httpPort = 8080;
+          };
+
           members.node1 = {
             nixosConfiguration = self.nixosConfigurations.base;
             install.ip = "192.168.1.10";
+            install.mac = "aa:bb:cc:dd:ee:01";  # auto-provision by MAC
+            install.disk = "/dev/sda";
             k3s.role = "server";
           };
 
           members.node2 = {
             nixosConfiguration = self.nixosConfigurations.base;
             install.ip = "192.168.1.11";
+            install.mac = "aa:bb:cc:dd:ee:02";
+            install.disk = "/dev/sda";
             k3s.role = "server";
           };
 
           members.worker1 = {
             nixosConfiguration = self.nixosConfigurations.base;
             install.ip = "192.168.1.20";
+            install.mac = "aa:bb:cc:dd:ee:03";
+            install.disk = "/dev/sda";
             k3s.role = "agent";
           };
         };
