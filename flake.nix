@@ -36,6 +36,7 @@
         k3s = ./cluster-modules/k3s.nix;
         sops = ./cluster-modules/sops.nix;
         cozystack = ./cluster-modules/cozystack.nix;
+        pxe = ./cluster-modules/pxe.nix;
       };
 
       # Export flake-parts module
