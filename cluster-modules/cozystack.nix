@@ -1,6 +1,14 @@
 # Cozystack cluster extension module
 # Configures NixOS for cozystack deployment on k3s
 # Reference: https://cozystack.io/docs/v1/install/kubernetes/generic/
+#
+# Storage configuration:
+#   members.node1.cozystack.storage = {
+#     disks = [ "/dev/sdb" ];           # dedicated disks for LINSTOR
+#     # OR
+#     systemPartition.enable = true;    # use partition on system disk
+#     systemPartition.size = "400G";
+#   };
 { lib, config, ... }:
 
 let
@@ -40,6 +48,14 @@ let
     "--kubelet-arg=max-pods=${toString cfg.maxPods}"
   ];
 
+  # Get members with storage config
+  membersWithStorage = lib.filterAttrs
+    (name: member:
+      let storage = member.cozystack.storage or {};
+      in (storage.disks or []) != [] || (storage.systemPartition.enable or false)
+    )
+    config.members;
+
   # Single NixOS module for cozystack requirements
   cozystackNixosModule = { config, pkgs, lib, nix8s, ... }:
     let
@@ -54,6 +70,17 @@ let
       isAgent = role == "agent";
       isK3sMember = role != null;
 
+      # Storage config
+      storageConfig = member.cozystack.storage or {};
+      storageDisks = storageConfig.disks or [];
+      systemPartition = storageConfig.systemPartition or {};
+      useSystemPartition = systemPartition.enable or false;
+      systemPartitionSize = systemPartition.size or "400G";
+      poolName = storageConfig.poolName or "data";
+      poolType = storageConfig.poolType or "zfs";
+
+      hasStorage = storageDisks != [] || useSystemPartition;
+
       cozystackFlags = if isServer then cozystackServerFlags else cozystackAgentFlags;
     in
     lib.mkIf (cozyCfg.enable && isK3sMember) {
@@ -66,6 +93,8 @@ let
         nfs-utils
         openiscsi
         multipath-tools
+        zfs  # for LINSTOR ZFS pools
+        lvm2  # for LINSTOR LVM pools
       ];
 
       # Required services
@@ -75,6 +104,10 @@ let
       };
 
       services.multipath.enable = true;
+
+      # ZFS support for LINSTOR
+      boot.supportedFilesystems = lib.mkIf (poolType == "zfs") [ "zfs" ];
+      boot.zfs.forceImportRoot = lib.mkIf (poolType == "zfs") false;
 
       # Sysctl configuration
       boot.kernel.sysctl = {
@@ -90,7 +123,7 @@ let
       boot.kernelModules = [
         "iscsi_tcp"
         "dm_multipath"
-      ];
+      ] ++ lib.optionals (poolType == "zfs") [ "zfs" ];
 
       # Firewall
       networking.firewall = {
@@ -194,6 +227,20 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = "Cozystack version (latest if null)";
+    };
+
+    storage = {
+      poolName = lib.mkOption {
+        type = lib.types.str;
+        default = "data";
+        description = "Default LINSTOR storage pool name";
+      };
+
+      poolType = lib.mkOption {
+        type = lib.types.enum [ "zfs" "lvm" "lvmthin" ];
+        default = "zfs";
+        description = "Storage pool type for LINSTOR";
+      };
     };
   };
 
@@ -315,6 +362,124 @@ PLATFORM_EOF
 
               echo "--- Packages ---"
               kubectl get packages -A 2>/dev/null || echo "No packages found"
+            '';
+          };
+      };
+
+      cozystack-init-storage = {
+        description = "Initialize LINSTOR storage pools on nodes";
+        builder = { pkgs, cluster, ... }:
+          let
+            # Build storage info for each member
+            storageInfo = lib.mapAttrs (name: member:
+              let
+                storage = member.cozystack.storage or {};
+                disks = storage.disks or [];
+                systemPartition = storage.systemPartition or {};
+                useSystemPartition = systemPartition.enable or false;
+                partitionSize = systemPartition.size or "400G";
+                poolName = storage.poolName or cfg.storage.poolName;
+                poolType = storage.poolType or cfg.storage.poolType;
+              in {
+                inherit name disks useSystemPartition partitionSize poolName poolType;
+                ip = member.install.ip or null;
+                systemDisk = member.install.disk or "/dev/sda";
+              }
+            ) membersWithStorage;
+
+            # Generate initialization script for a member
+            mkInitScript = name: info: ''
+              echo ""
+              echo "=== Initializing storage on ${name} (${info.ip or "no-ip"}) ==="
+              ${if info.disks != [] then ''
+              echo "Mode: Dedicated disks"
+              echo "Disks: ${lib.concatStringsSep " " info.disks}"
+              echo "Pool: ${info.poolName} (${info.poolType})"
+              echo ""
+
+              # Check if pool already exists
+              if linstor storage-pool list --node ${clusterName}-${name} | grep -q "${info.poolName}"; then
+                echo "Storage pool '${info.poolName}' already exists on ${name}, skipping..."
+              else
+                echo "Creating ${info.poolType} storage pool..."
+                linstor physical-storage create-device-pool \
+                  ${info.poolType} ${clusterName}-${name} \
+                  ${lib.concatStringsSep " " info.disks} \
+                  --pool-name ${info.poolName} \
+                  --storage-pool ${info.poolName}
+                echo "Done."
+              fi
+              '' else if info.useSystemPartition then ''
+              echo "Mode: System disk partition"
+              echo "System disk: ${info.systemDisk}"
+              echo "Partition size: ${info.partitionSize}"
+              echo "Pool: ${info.poolName} (${info.poolType})"
+              echo ""
+              echo "WARNING: System partition mode requires manual setup:"
+              echo "  1. SSH to ${name}: ssh root@${info.ip or "IP"}"
+              echo "  2. Create partition on ${info.systemDisk} with size ${info.partitionSize}"
+              echo "  3. Note the partition device (e.g., ${info.systemDisk}p6 or ${info.systemDisk}6)"
+              echo "  4. Wipe the partition: wipefs -a /dev/<partition>"
+              echo "  5. Add to LINSTOR:"
+              echo "     linstor ps cdp ${info.poolType} ${clusterName}-${name} /dev/<partition> \\"
+              echo "       --pool-name ${info.poolName} --storage-pool ${info.poolName}"
+              '' else ''
+              echo "No storage configuration for ${name}"
+              ''}
+            '';
+
+          in
+          pkgs.writeShellApplication {
+            name = "nix8sctl-${clusterName}-cozystack-init-storage";
+            runtimeInputs = with pkgs; [ kubectl ];
+            text = ''
+              set -euo pipefail
+
+              KUBECONFIG="''${KUBECONFIG:-kubeconfig/${clusterName}.yaml}"
+              export KUBECONFIG
+
+              echo "========================================"
+              echo "LINSTOR Storage Initialization"
+              echo "Cluster: ${clusterName}"
+              echo "========================================"
+              echo ""
+
+              # Check LINSTOR controller is running
+              echo "Checking LINSTOR controller..."
+              if ! kubectl get pods -n cozy-linstor -l app=linstor-controller 2>/dev/null | grep -q Running; then
+                echo "ERROR: LINSTOR controller is not running"
+                echo "Make sure cozystack is bootstrapped first:"
+                echo "  nix8sctl ${clusterName} cozystack-bootstrap"
+                exit 1
+              fi
+
+              # Get LINSTOR controller pod
+              LINSTOR_POD=$(kubectl get pods -n cozy-linstor -l app=linstor-controller -o jsonpath='{.items[0].metadata.name}')
+              echo "LINSTOR controller pod: $LINSTOR_POD"
+              echo ""
+
+              # Function to run linstor commands
+              linstor() {
+                kubectl exec -n cozy-linstor "$LINSTOR_POD" -- linstor "$@"
+              }
+
+              echo "Current storage pools:"
+              linstor storage-pool list || true
+              echo ""
+
+              echo "Available physical storage:"
+              linstor physical-storage list || true
+              echo ""
+
+              ${lib.concatStringsSep "\n" (lib.mapAttrsToList mkInitScript storageInfo)}
+
+              echo ""
+              echo "========================================"
+              echo "Storage initialization complete"
+              echo "========================================"
+              echo ""
+              echo "Verify with:"
+              echo "  kubectl exec -n cozy-linstor $LINSTOR_POD -- linstor storage-pool list"
             '';
           };
       };
