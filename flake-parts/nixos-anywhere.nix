@@ -5,17 +5,8 @@
 let
   cfg = config.nix8s;
 
-  memberAttrs = [ "node" "role" "ip" ];
-
-  resolveNode = clusterName: memberName: nodeRef:
-    if builtins.isAttrs nodeRef
-    then nodeRef
-    else cfg.nodes.${nodeRef} or { };
-
-  buildNodeConfig = clusterName: memberName: member:
-    lib.recursiveUpdate
-      (resolveNode clusterName memberName member.node)
-      (removeAttrs member memberAttrs);
+  # Check if nixos-anywhere is enabled for a cluster
+  anywhereEnabled = cluster: cluster.provisioning.nixos-anywhere.enable or false;
 
 in
 {
@@ -24,12 +15,11 @@ in
       # Generate deploy script for a single node
       mkDeployScript = clusterName: cluster: memberName: member:
         let
-          nodeConfig = buildNodeConfig clusterName memberName member;
-          nodeName = "${clusterName}-${memberName}";
-          targetIp = member.ip;
+          configName = "${clusterName}-${memberName}";
+          targetIp = member.ip or (throw "nix8s: member ${memberName} in cluster ${clusterName} has no IP");
 
-          # SSH config from provisioning or defaults
-          provCfg = cluster.provisioning.nixos-anywhere or cfg.provisioning.nixos-anywhere or { };
+          # SSH config from cluster provisioning
+          provCfg = cluster.provisioning.nixos-anywhere;
           sshUser = provCfg.ssh.user or "root";
           sshKeyFile = provCfg.ssh.keyFile or null;
           sshPort = provCfg.ssh.port or 22;
@@ -47,7 +37,7 @@ in
 
         in
         pkgs.writeShellApplication {
-          name = "${nodeName}-deploy";
+          name = "${configName}-deploy";
           runtimeInputs = with pkgs; [ openssh ];
           text = ''
             set -euo pipefail
@@ -70,16 +60,16 @@ in
 
             echo "========================================"
             echo " nixos-anywhere Deploy"
-            echo " Node: ${nodeName}"
+            echo " Config: ${configName}"
             echo " Target: $TARGET_USER@$TARGET_IP:$SSH_PORT"
-            echo " Flake: $FLAKE_REF#${nodeName}"
+            echo " Flake: $FLAKE_REF#${configName}"
             ${if sshKeyFile == null then ''echo " SSH: ''${SSH_KEY_ARGS[*]:-ssh-agent}"'' else ''echo " SSH: ${sshKeyFile}"''}
             echo "========================================"
             echo ""
 
             # Build nixos-anywhere command
             NIXOS_ANYWHERE_ARGS=(
-              --flake "$FLAKE_REF#${nodeName}"
+              --flake "$FLAKE_REF#${configName}"
               --ssh-port "$SSH_PORT"
             )
 
@@ -113,23 +103,30 @@ in
         let
           memberNames = lib.attrNames cluster.members;
 
-          # Get server members first, then agents
-          serverNames = lib.filter
-            (name: cluster.members.${name}.role == "server")
-            memberNames;
-          agentNames = lib.filter
-            (name: cluster.members.${name}.role == "agent")
+          # Use k3s extension roles for ordering if available
+          k3sServers = cluster.k3s.servers or [ ];
+          k3sAgents = cluster.k3s.agents or [ ];
+          otherMembers = lib.filter
+            (name: !(lib.elem name k3sServers) && !(lib.elem name k3sAgents))
             memberNames;
 
           # Sort servers, first server first
-          sortedServerNames = lib.sort (a: b: a < b) serverNames;
-          firstServerName = cluster.firstServer or (lib.head sortedServerNames);
+          sortedServerNames = lib.sort (a: b: a < b) k3sServers;
+          firstServerName =
+            if sortedServerNames != [ ]
+            then cluster.k3s.firstServer or (lib.head sortedServerNames)
+            else if memberNames != [ ] then lib.head (lib.sort (a: b: a < b) memberNames)
+            else null;
           otherServerNames = lib.filter (n: n != firstServerName) sortedServerNames;
 
-          # Order: first server, other servers, agents
-          orderedNames = [ firstServerName ] ++ otherServerNames ++ agentNames;
+          # Order: first server, other servers, agents, others
+          orderedNames =
+            (if firstServerName != null then [ firstServerName ] else [ ])
+            ++ otherServerNames
+            ++ k3sAgents
+            ++ otherMembers;
 
-          provCfg = cluster.provisioning.nixos-anywhere or cfg.provisioning.nixos-anywhere or { };
+          provCfg = cluster.provisioning.nixos-anywhere;
           sshUser = provCfg.ssh.user or "root";
           sshKeyFile = provCfg.ssh.keyFile or null;
 
@@ -159,63 +156,61 @@ in
             echo "========================================"
             echo " nixos-anywhere Cluster Deploy"
             echo " Cluster: ${clusterName}"
-            echo " Nodes: ${toString (lib.length orderedNames)}"
+            echo " Members: ${toString (lib.length orderedNames)}"
             echo "========================================"
             echo ""
             echo "Deploy order:"
             ${lib.concatMapStringsSep "\n" (name:
-              let member = cluster.members.${name};
-              in ''echo "  ${toString (lib.elemAt orderedNames (lib.lists.findFirstIndex (n: n == name) 0 orderedNames) + 1)}. ${clusterName}-${name} (${member.role}) - ${member.ip}"''
+              let
+                member = cluster.members.${name};
+                ipStr = member.ip or "no-ip";
+              in ''echo "  - ${clusterName}-${name} (${ipStr})"''
             ) orderedNames}
             echo ""
 
-            # Deploy first server first (for cluster init)
-            echo "Deploying first server: ${clusterName}-${firstServerName}..."
+            ${if firstServerName != null then ''
+            # Deploy first member first
+            echo "Deploying first: ${clusterName}-${firstServerName}..."
             nix run "$FLAKE_REF#${clusterName}-${firstServerName}-deploy" -- "$FLAKE_REF"
             echo ""
 
-            # Wait for first server to be ready
-            echo "Waiting for first server API..."
-            FIRST_SERVER_IP="${cluster.members.${firstServerName}.ip}"
-            for i in $(seq 1 60); do
-              if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-                   "''${SSH_KEY_ARGS[@]}" \
-                   ${sshUser}@"$FIRST_SERVER_IP" \
-                   "kubectl get nodes" &>/dev/null; then
-                echo "First server is ready!"
-                break
-              fi
-              echo "Waiting... ($i/60)"
-              sleep 10
-            done
+            # Wait for first member to be reachable
+            echo "Waiting for ${firstServerName} to be reachable..."
+            FIRST_IP="${cluster.members.${firstServerName}.ip or ""}"
+            if [[ -n "$FIRST_IP" ]]; then
+              for i in $(seq 1 30); do
+                if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+                     "''${SSH_KEY_ARGS[@]}" \
+                     ${sshUser}@"$FIRST_IP" \
+                     "echo ok" &>/dev/null; then
+                  echo "${firstServerName} is ready!"
+                  break
+                fi
+                echo "Waiting... ($i/30)"
+                sleep 5
+              done
+            fi
             echo ""
+            '' else ""}
 
-            # Deploy remaining nodes
+            # Deploy remaining members
             ${lib.concatMapStringsSep "\n" (name: ''
               echo "Deploying ${clusterName}-${name}..."
               nix run "$FLAKE_REF#${clusterName}-${name}-deploy" -- "$FLAKE_REF"
               echo ""
-            '') (otherServerNames ++ agentNames)}
+            '') (lib.filter (n: n != firstServerName) orderedNames)}
 
             echo "========================================"
             echo " Cluster deploy complete!"
             echo "========================================"
-            echo ""
-            echo "Fetch kubeconfig:"
-            echo "  nix run $FLAKE_REF#fetch-kubeconfig -- ${clusterName}"
           '';
         };
 
       # Generate apps for all clusters
       nixosAnywhereApps = lib.concatMapAttrs
         (clusterName: cluster:
-          let
-            enabled = cluster.provisioning.nixos-anywhere.enable
-              or cfg.provisioning.nixos-anywhere.enable
-              or false;
-          in
-          lib.optionalAttrs enabled (
-            # Per-node deploy apps
+          lib.optionalAttrs (anywhereEnabled cluster) (
+            # Per-member deploy apps
             (lib.mapAttrs'
               (memberName: member:
                 lib.nameValuePair

@@ -10,29 +10,19 @@ let
   nix8sModulesPath = ../modules/nixos;
   pxeServerScript = ../scripts/pxe_server.py;
 
-  memberAttrs = [ "node" "role" "ip" ];
+  # Check if PXE is enabled for a cluster
+  pxeEnabled = cluster: cluster.provisioning.pxe.enable or false;
 
-  resolveNode = clusterName: memberName: nodeRef:
-    if builtins.isAttrs nodeRef
-    then nodeRef
-    else cfg.nodes.${nodeRef} or (throw "nix8s: Node '${nodeRef}' not found");
-
-  buildNodeConfig = clusterName: memberName: member:
-    lib.recursiveUpdate
-      (resolveNode clusterName memberName member.node)
-      (removeAttrs member memberAttrs);
-
-  # Get MAC address for a member (from node or member override)
+  # Get MAC address for a member
   getMemberMac = clusterName: memberName: member:
-    let
-      nodeConfig = buildNodeConfig clusterName memberName member;
-    in
-    member.network.mac or nodeConfig.network.mac or null;
+    member.network.mac or null;
 
   # Generate installer NixOS configuration for a member
   mkInstallerConfig = { clusterName, cluster, memberName, member }:
     let
-      nodeConfig = buildNodeConfig clusterName memberName member;
+      nodeName = memberName;
+      nodeConfig = cfg.nodes.${memberName} or
+        (throw "nix8s: clusters.${clusterName}.members.${memberName} references node '${memberName}' which doesn't exist");
       targetConfigName = "${clusterName}-${memberName}";
     in
     lib.nixosSystem {
@@ -40,7 +30,7 @@ let
       specialArgs = {
         inherit inputs;
         nix8s = {
-          inherit cluster member nodeConfig clusterName memberName;
+          inherit nodeName nodeConfig cluster clusterName memberName member;
           isInstaller = true;
           targetConfig = config.flake.nixosConfigurations.${targetConfigName};
         };
@@ -71,7 +61,7 @@ let
   # Generate all installer configurations
   installerConfigs = lib.concatMapAttrs
     (clusterName: cluster:
-      lib.optionalAttrs (cluster.provisioning.pxe.enable or cfg.provisioning.pxe.enable or false)
+      lib.optionalAttrs (pxeEnabled cluster)
         (lib.mapAttrs'
           (memberName: member:
             lib.nameValuePair
@@ -85,7 +75,7 @@ let
   # Generate discovery configurations
   discoveryConfigs = lib.concatMapAttrs
     (clusterName: cluster:
-      lib.optionalAttrs (cluster.provisioning.pxe.enable or cfg.provisioning.pxe.enable or false) {
+      lib.optionalAttrs (pxeEnabled cluster) {
         "${clusterName}-discovery" = mkDiscoveryConfig { inherit clusterName cluster; };
       }
     )
@@ -237,9 +227,9 @@ in
       mkPxeServer = clusterName: cluster:
         let
           pxeAssets = mkPxeAssets clusterName cluster;
-          pxeConfig = cluster.provisioning.pxe or cfg.provisioning.pxe or { };
-          interface = pxeConfig.interface or "eth0";
-          httpPort = pxeConfig.httpPort or 8080;
+          pxeConfig = cluster.provisioning.pxe;
+          interface = pxeConfig.interface;
+          httpPort = pxeConfig.httpPort;
           # Installer names for symlinks
           installerNames = lib.mapAttrsToList
             (memberName: _: "${clusterName}-${memberName}-installer")
@@ -441,7 +431,7 @@ in
       # Generate packages for clusters with PXE enabled
       pxePackages = lib.concatMapAttrs
         (clusterName: cluster:
-          lib.optionalAttrs (cluster.provisioning.pxe.enable or cfg.provisioning.pxe.enable or false) {
+          lib.optionalAttrs (pxeEnabled cluster) {
             "${clusterName}-pxe-server" = mkPxeServer clusterName cluster;
             "${clusterName}-pxe-assets" = mkPxeAssets clusterName cluster;
           }

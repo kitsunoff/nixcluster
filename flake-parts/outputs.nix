@@ -1,75 +1,79 @@
-# Generates nixosConfigurations from nix8s clusters
+# Generates nixosConfigurations from nix8s nodes and clusters
 { lib, config, inputs, ... }:
 
 let
   cfg = config.nix8s;
   nix8sModulesPath = ../modules/nixos;
 
-  memberAttrs = [ "node" "role" "ip" ];
+  # Build standalone NixOS config for a node
+  mkStandaloneConfig = nodeName: nodeConfig:
+    lib.nixosSystem {
+      system = "x86_64-linux";
+      specialArgs = {
+        inherit inputs;
+        nix8s = {
+          inherit nodeName nodeConfig;
+          # No cluster context
+          cluster = null;
+          clusterName = null;
+          memberName = null;
+        };
+      };
+      modules = [
+        inputs.disko.nixosModules.disko
+        inputs.sops-nix.nixosModules.sops
+        (nix8sModulesPath + "/base.nix")
+      ] ++ (nodeConfig.nixosModules or [ ])
+      ++ (cfg.nixosModulesFor.${nodeName} or [ ]);
+    };
 
-  resolveNode = clusterName: memberName: nodeRef:
-    if builtins.isAttrs nodeRef
-    then nodeRef
-    else
-      cfg.nodes.${nodeRef} or
-        (throw "nix8s: clusters.${clusterName}.members.${memberName}.node references '${nodeRef}' which doesn't exist in nix8s.nodes. Available nodes: ${builtins.toString (builtins.attrNames cfg.nodes)}");
-
-  buildNodeConfig = clusterName: memberName: member:
+  # Build NixOS config for a node in cluster context
+  mkClusterConfig = { clusterName, cluster, memberName }:
     let
-      baseNode = resolveNode clusterName memberName member.node;
-      memberOverrides = removeAttrs member memberAttrs;
-    in
-    lib.recursiveUpdate baseNode memberOverrides;
+      nodeName = memberName;
+      nodeConfig = cfg.nodes.${memberName} or
+        (throw "nix8s: clusters.${clusterName}.members.${memberName} references node '${memberName}' which doesn't exist in nix8s.nodes. Available nodes: ${builtins.toString (builtins.attrNames cfg.nodes)}");
 
-  validateSecrets = clusterName: cluster:
-    if (cluster.secrets.token or null) == null
-    then throw "nix8s: clusters.${clusterName}.secrets.token is required"
-    else cluster;
-
-  mkNixosConfig = { clusterName, cluster, memberName, member }:
-    let
-      validatedCluster = validateSecrets clusterName cluster;
-      nodeConfig = buildNodeConfig clusterName memberName member;
-      nodeName = "${clusterName}-${memberName}";
-
-      isFirstServer =
-        member.role == "server" &&
-        memberName == (cluster.ha.firstServer or
-          (lib.head (lib.sort (a: b: a < b)
-            (lib.attrNames (lib.filterAttrs (_: m: m.role == "server") cluster.members)))));
+      member = cluster.members.${memberName};
+      configName = "${clusterName}-${memberName}";
     in
     lib.nixosSystem {
       system = "x86_64-linux";
       specialArgs = {
         inherit inputs;
         nix8s = {
-          cluster = validatedCluster;
-          inherit member nodeConfig;
-          inherit clusterName memberName isFirstServer;
+          inherit nodeName nodeConfig;
+          inherit cluster clusterName memberName member;
+          configName = configName;
         };
       };
       modules = [
         inputs.disko.nixosModules.disko
+        inputs.sops-nix.nixosModules.sops
         (nix8sModulesPath + "/base.nix")
-        (nix8sModulesPath + "/k3s.nix")
-        (nix8sModulesPath + "/cozystack.nix")
-        (nix8sModulesPath + "/helm-bootstrap.nix")
-        (nix8sModulesPath + "/manifests-bootstrap.nix")
+        (nix8sModulesPath + "/sops.nix")
       ] ++ (nodeConfig.nixosModules or [ ])
-      ++ (cfg.nixosModulesFor.${nodeName} or [ ]);
+      ++ (cfg.nixosModulesFor.${configName} or [ ]);
     };
 
-  allConfigs = lib.concatMapAttrs
+  # Generate standalone configs for all nodes
+  standaloneConfigs = lib.mapAttrs mkStandaloneConfig cfg.nodes;
+
+  # Generate cluster configs for all cluster members
+  clusterConfigs = lib.concatMapAttrs
     (clusterName: cluster:
       lib.mapAttrs'
-        (memberName: member:
+        (memberName: _member:
           lib.nameValuePair
             "${clusterName}-${memberName}"
-            (mkNixosConfig { inherit clusterName cluster memberName member; })
+            (mkClusterConfig { inherit clusterName cluster memberName; })
         )
         cluster.members
     )
     cfg.clusters;
+
+  # Merge: cluster configs override standalone if same name
+  allConfigs = standaloneConfigs // clusterConfigs;
 
 in
 {
