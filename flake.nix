@@ -35,6 +35,7 @@
         core = ./cluster-modules/core.nix;
         k3s = ./cluster-modules/k3s.nix;
         sops = ./cluster-modules/sops.nix;
+        cozystack = ./cluster-modules/cozystack.nix;
       };
 
       # Export flake-parts module
@@ -67,11 +68,14 @@
       # Minimal base NixOS configuration for testing
       nixosConfigurations.base = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [{
-          boot.loader.grub.device = "/dev/sda";
-          fileSystems."/" = { device = "/dev/sda1"; fsType = "ext4"; };
-          system.stateVersion = "24.11";
-        }];
+        modules = [
+          inputs.sops-nix.nixosModules.sops
+          {
+            boot.loader.grub.device = "/dev/sda";
+            fileSystems."/" = { device = "/dev/sda1"; fsType = "ext4"; };
+            system.stateVersion = "24.11";
+          }
+        ];
       };
 
       # Test cluster
@@ -80,10 +84,17 @@
           imports = [
             self.clusterModules.k3s
             self.clusterModules.sops
+            self.clusterModules.cozystack
           ];
           name = "dev";
 
           sops.enable = true;
+          k3s.enable = true;
+
+          cozystack = {
+            enable = true;
+            publishing.host = "cozy.example.com";
+          };
 
           members.node1 = {
             nixosConfiguration = self.nixosConfigurations.base;
