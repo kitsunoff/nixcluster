@@ -1,489 +1,243 @@
-# nix8s
+# nixcluster
 
-Declarative NixOS-based Kubernetes (k3s) cluster provisioning with flake-parts.
+Declarative NixOS-based Kubernetes cluster management with module system.
+
+## Features
+
+- **Cluster Modules** — extensible architecture for k3s, sops, cozystack
+- **NixOS Integration** — cluster config generates NixOS configurations
+- **CLI Tool** — `nix8sctl` for managing clusters
+- **Secrets Management** — sops-based encrypted secrets with age
 
 ## Quick Start
 
 ```bash
-# Create new project
-nix flake init --template github:kitsunoff/nix8s
+# Clone and enter
+git clone https://github.com/kitsunoff/nixcluster
+cd nixcluster
 
-# Initialize secrets directory
-nix run .#init-secrets
+# Generate cluster secrets
+nix run .#nix8sctl -- dev gen-secrets
 
-# Generate cluster secrets (k3s tokens + SSH keypair)
-nix run .#gen-secrets -- dev
+# Show cluster info
+nix run .#nix8sctl -- dev
 
-# Deploy via nixos-anywhere (recommended)
-# Boot target machines with any Linux, then:
-nix run .#dev-deploy
-
-# Or deploy via PXE (bare metal network boot)
-nix run .#dev-pxe-server
-
-# After nodes are installed, fetch kubeconfig
-nix run .#fetch-kubeconfig -- dev
-
-# Use kubectl
-export KUBECONFIG=nix8s/secrets/dev-kubeconfig.yaml
-kubectl get nodes
+# Bootstrap cluster (shows deploy order)
+nix run .#nix8sctl -- dev bootstrap
 ```
 
-## Project Structure
-
-```
-my-cluster/
-├── flake.nix
-└── nix8s/                    # Auto-imported via import-tree
-    ├── nodes/               # Node templates (hardware config)
-    │   └── standard.nix
-    ├── clusters/            # Cluster definitions
-    │   └── dev.nix
-    ├── provisioning.nix     # Provisioning method config
-    └── secrets/             # Encrypted secrets (sops)
-        └── dev.json
-```
-
-## Usage
-
-### Define Nodes
+## Cluster Configuration
 
 ```nix
-# nix8s/nodes/server-nvme.nix
-{ ... }:
-{
-  nix8s.nodes.server-nvme = {
-    install.disk = "/dev/nvme0n1";
-    # Or use raw disko config:
-    # disko.devices = { ... };
-  };
-}
-```
-
-### Define Clusters
-
-```nix
-# nix8s/clusters/prod.nix
-{ ... }:
-{
-  nix8s.clusters.prod = {
-    # Optional: override k3s package
-    # k3s.package = pkgs.k3s_1_30;
-
-    # Optional: specify first server for cluster-init (auto-detected if not set)
-    # firstServer = "server1";
-
-    secrets = builtins.fromJSON (builtins.readFile ../secrets/prod.json);
-
-    members = {
-      server1 = { node = "server-nvme"; role = "server"; ip = "192.168.1.10"; };
-      server2 = { node = "server-nvme"; role = "server"; ip = "192.168.1.11"; };
-      server3 = { node = "server-nvme"; role = "server"; ip = "192.168.1.12"; };
-      agent1  = { node = "server-nvme"; role = "agent";  ip = "192.168.1.20"; };
-    };
-  };
-}
-```
-
-### Configure Provisioning
-
-```nix
-# nix8s/provisioning.nix
-{ ... }:
-{
-  nix8s.provisioning = {
-    nixos-anywhere.ssh = {
-      user = "root";
-      keyFile = "~/.ssh/id_ed25519";
-    };
-  };
-}
-```
-
-## Outputs
-
-```bash
-nix flake show
-```
-
-- `nixosConfigurations.<cluster>-<member>` — NixOS configurations for each node
-- `packages.<cluster>-deploy` — Deploy entire cluster via nixos-anywhere
-- `packages.<cluster>-<member>-deploy` — Deploy single node via nixos-anywhere
-- `packages.<cluster>-upgrade` — Rolling upgrade entire cluster
-- `packages.<cluster>-<member>-upgrade` — Upgrade single node
-- `packages.<cluster>-helm-deploy` — Deploy Helm charts
-- `packages.<cluster>-manifests-apply` — Apply raw manifests
-- `packages.<cluster>-pxe-server` — PXE boot server
-- `packages.<cluster>-pxe-assets` — PXE boot assets
-- `apps.gen-secrets` — Generate k3s tokens and SSH keypair
-- `apps.init-secrets` — Initialize secrets directory with .gitignore
-- `apps.fetch-kubeconfig` — Fetch kubeconfig from running cluster
-- `devShells.default` — Development shell with kubectl, helm, sops
-
-## Flake Modules
-
-Use individual modules for granular control:
-
-```nix
-{
+clusterConfigurations.prod = mkCluster {
   imports = [
-    nix8s.flakeModules.core           # nix8s options
-    nix8s.flakeModules.outputs        # nixosConfigurations
-    nix8s.flakeModules.nixos-anywhere # nixos-anywhere provisioning
-    nix8s.flakeModules.pxe            # PXE provisioning
-    nix8s.flakeModules.helm           # Helm deployments
-    nix8s.flakeModules.manifests      # Raw manifests
-    nix8s.flakeModules.upgrade        # Rolling upgrades
-    nix8s.flakeModules.devshell       # devShells
-    nix8s.flakeModules.gen-secrets      # gen-secrets, init-secrets apps
-    nix8s.flakeModules.fetch-kubeconfig # fetch-kubeconfig app
-    nix8s.flakeModules.systems          # supported systems
+    clusterModules.k3s
+    clusterModules.sops
+    clusterModules.cozystack
   ];
-}
-```
 
-Or use all-in-one:
+  name = "prod";
 
-```nix
-{
-  imports = [ nix8s.flakeModules.default ];
-}
-```
-
-## Node Configuration
-
-### Simple Disk
-
-```nix
-nix8s.nodes.my-node = {
-  install.disk = "/dev/sda";
-  install.swapSize = "8G";  # optional
-};
-```
-
-### Custom Disko
-
-```nix
-nix8s.nodes.my-node = {
-  disko.devices.disk.main = {
-    type = "disk";
-    device = "/dev/nvme0n1";
-    content = { ... };
-  };
-};
-```
-
-### Custom NixOS Modules
-
-```nix
-nix8s.nodes.my-node = {
-  install.disk = "/dev/sda";
-  nixosModules = [
-    ({ pkgs, ... }: {
-      environment.systemPackages = [ pkgs.htop ];
-    })
-  ];
-};
-```
-
-### Static IP with systemd-networkd
-
-Use MAC address matching for reliable static IP (interface name doesn't matter):
-
-```nix
-nix8s.nodes.my-node = {
-  network.mac = "aa:bb:cc:dd:ee:ff";
-  install.disk = "/dev/nvme0n1";
-
-  nixosModules = [
-    {
-      networking.useNetworkd = true;
-      systemd.network.networks."10-lan" = {
-        matchConfig.MACAddress = "aa:bb:cc:dd:ee:ff";
-        address = [ "192.168.1.10/24" ];
-        gateway = [ "192.168.1.1" ];
-        dns = [ "192.168.1.1" ];
-      };
-    }
-  ];
-};
-```
-
-## Member Overrides
-
-Override node settings per-member:
-
-```nix
-members = {
-  server1 = {
-    node = "standard";
-    role = "server";
-    ip = "192.168.1.10";
-    # Override disk for this specific member
-    install.disk = "/dev/nvme0n1";
-  };
-};
-```
-
-## Secrets
-
-Secrets are generated with SSH keypair for node access:
-
-```bash
-# Initialize secrets directory (creates .gitignore)
-nix run .#init-secrets
-
-# Generate k3s tokens + SSH keypair
-nix run .#gen-secrets -- prod
-```
-
-This creates:
-- `nix8s/secrets/prod.json` — k3s tokens + SSH public key (commit this)
-- `nix8s/secrets/prod_ssh` — SSH private key (DO NOT commit, gitignored)
-- `nix8s/secrets/prod_ssh.pub` — SSH public key (commit this)
-
-The SSH public key is automatically added to root's authorized_keys on all nodes.
-
-### Fetch Kubeconfig
-
-After cluster is running:
-
-```bash
-# Fetch kubeconfig via SSH
-nix run .#fetch-kubeconfig -- prod
-
-# Use kubectl
-export KUBECONFIG=nix8s/secrets/prod-kubeconfig.yaml
-kubectl get nodes
-
-# Or merge with existing config
-kubectl kc add --file nix8s/secrets/prod-kubeconfig.yaml --context-name prod
-```
-
-### Optional: Encrypt with SOPS
-
-```bash
-sops encrypt --in-place nix8s/secrets/prod.json
-git add --force nix8s/secrets/prod.json
-```
-
-## Helm Charts
-
-Deploy Helm charts on cluster bootstrap or via package:
-
-```nix
-nix8s.clusters.prod = {
-  helmPackages = {
-    autoDeployOnBootstrap = true;  # Deploy after k3s starts
-    repos.metrics = "https://kubernetes-sigs.github.io/metrics-server/";
-    charts.metrics-server = {
-      chart = "metrics/metrics-server";
-      version = "3.12.0";
-      namespace = "kube-system";
-      values = { args = [ "--kubelet-insecure-tls" ]; };
-    };
-  };
-};
-```
-
-Manual deploy: `nix run .#prod-helm-deploy`
-
-## Raw Manifests
-
-Apply Kubernetes manifests on bootstrap or via package:
-
-```nix
-nix8s.clusters.prod = {
-  manifests = {
-    autoApplyOnBootstrap = true;
-    resources = {
-      my-namespace.content = ''
-        apiVersion: v1
-        kind: Namespace
-        metadata:
-          name: my-app
-      '';
-      my-app.file = ./manifests/app.yaml;
-      external.url = "https://example.com/manifest.yaml";
-      kustomize-app.kustomize = ./kustomize/app;
-    };
-  };
-};
-```
-
-Manual apply: `nix run .#prod-manifests-apply`
-
-## Rolling Upgrades
-
-Perform safe rolling upgrades with cordon/drain/rebuild/uncordon:
-
-```nix
-nix8s.clusters.prod = {
-  upgrade = {
-    maxParallel = 1;           # Nodes upgraded at a time
-    serversFirst = false;      # Agents first, then servers
-    rollbackOnFailure = true;  # Auto-rollback on failure
-    drainTimeout = "5m";
-    healthCheckTimeout = "3m";
-    pauseBetweenNodes = "10";  # Seconds
-  };
-};
-```
-
-```bash
-# Upgrade entire cluster
-nix run .#prod-upgrade
-
-# Upgrade single node
-nix run .#prod-server1-upgrade
-```
-
-## Provisioning Methods
-
-### nixos-anywhere (Recommended)
-
-Deploy nodes remotely via SSH to any Linux system:
-
-```nix
-# nix8s/provisioning.nix
-{ ... }:
-{
-  nix8s.provisioning = {
-    nixos-anywhere = {
-      enable = true;
-      ssh.user = "root";
-      # ssh.keyFile = "/path/to/key";  # Optional, uses ssh-agent by default
-      # ssh.port = 22;
-    };
-  };
-}
-```
-
-```bash
-# Deploy single node
-nix run .#prod-server1-deploy
-
-# Deploy entire cluster (first server first, then rest)
-nix run .#prod-deploy
-```
-
-Requirements:
-
-- Target machine must be booted into any Linux (e.g., NixOS installer ISO, Ubuntu live, etc.)
-- SSH access to root (or sudo user)
-- nixos-anywhere will partition disks and install NixOS automatically
-
-### PXE Provisioning
-
-Boot nodes via network with automatic MAC-based routing:
-
-```nix
-nix8s.clusters.prod = {
-  members.server1 = {
-    node = "standard";
-    role = "server";
-    ip = "192.168.1.10";
-    network.mac = "aa:bb:cc:dd:ee:ff";  # For auto-install
-  };
-};
-```
-
-```bash
-# Start PXE server (TFTP + HTTP)
-nix run .#prod-pxe-server
-
-# Build PXE assets only
-nix build .#prod-pxe-assets
-```
-
-## Cozystack Integration
-
-Deploy [Cozystack](https://cozystack.io) platform on your cluster:
-
-```nix
-nix8s.clusters.prod = {
+  # Enable modules
+  k3s.enable = true;
+  sops.enable = true;
   cozystack = {
     enable = true;
-    host = "cozy.example.com";
-
-    # LINSTOR distributed storage
-    linstor = {
-      enable = true;
-      storage.poolName = "data";
-      storage.type = "lvm";     # or "zfs"
-    };
-
-    # MetalLB load balancer
-    metallb = {
-      enable = true;
-      addresses = [ "192.168.1.200-192.168.1.250" ];
-      mode = "l2";  # or "bgp"
-    };
+    publishing.host = "cozy.example.com";
   };
-  # ...
+
+  # Define members
+  members.node1 = {
+    nixosConfiguration = self.nixosConfigurations.base;
+    install.ip = "192.168.1.10";
+    k3s.role = "server";
+  };
+
+  members.node2 = {
+    nixosConfiguration = self.nixosConfigurations.base;
+    install.ip = "192.168.1.11";
+    k3s.role = "server";
+  };
+
+  members.worker1 = {
+    nixosConfiguration = self.nixosConfigurations.base;
+    install.ip = "192.168.1.20";
+    k3s.role = "agent";
+  };
 };
 ```
 
-### LINSTOR Storage Options
-
-Storage disks are configured at **node level**:
-
-**Option 1: Partition on system disk (single disk nodes)**
-
-```nix
-nix8s.nodes.my-node = {
-  install.disk = "/dev/nvme0n1";
-  install.rootSize = "100G";       # Fixed root size
-  linstor.partitionFromRoot = true; # Rest of disk for LINSTOR
-};
-```
-
-**Option 2: Dedicated storage disk**
-
-```nix
-nix8s.nodes.my-node = {
-  install.disk = "/dev/nvme0n1";  # System disk
-  linstor.disk = "/dev/sdb";       # Entire disk for LINSTOR
-};
-```
-
-**Option 3: Multiple storage disks**
-
-```nix
-nix8s.nodes.my-node = {
-  install.disk = "/dev/nvme0n1";
-  linstor.disks = [ "/dev/sdb" "/dev/sdc" "/dev/sdd" ];
-};
-```
-
-### Deployment Workflow
+## CLI Commands
 
 ```bash
-# 1. Boot nodes via PXE
-nix run .#prod-pxe-server -- eth0
+nix run .#nix8sctl -- <cluster> <command> [args]
 
-# 2. Fetch kubeconfig after nodes are installed
-nix run .#fetch-kubeconfig -- prod
-export KUBECONFIG=nix8s/secrets/prod-kubeconfig.yaml
-
-# 3. Cozystack auto-bootstraps on first server, or manually:
-# nix run .#prod-cozystack-bootstrap
-
-# 4. Setup LINSTOR storage pools
-nix run .#prod-linstor-setup
-
-# 5. Setup MetalLB networking
-nix run .#prod-metallb-setup
-
-# 6. Access dashboard
-echo "https://cozy.example.com"
+# Available commands:
+#   apply              - Apply config to member
+#   bootstrap          - Bootstrap k3s cluster
+#   gen-secrets        - Generate cluster secrets
+#   edit-secrets       - Edit cluster secrets
+#   show-secrets       - Show decrypted secrets
+#   kubeconfig         - Fetch kubeconfig
+#   cozystack-bootstrap - Bootstrap cozystack
+#   cozystack-status   - Show cozystack status
 ```
 
-### Cozystack Outputs
+## Architecture
 
-- `packages.<cluster>-cozystack-bootstrap` — Manual cozystack installation
-- `packages.<cluster>-linstor-setup` — Configure LINSTOR storage pools
-- `packages.<cluster>-metallb-setup` — Configure MetalLB IP pools
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Cluster Configuration                     │
+│                                                              │
+│  k3s.enable = true;                                         │
+│  cozystack.enable = true;                                   │
+│                                                              │
+│  members.node1 = {                                          │
+│    nixosConfiguration = base;                               │
+│    install.ip = "192.168.1.10";                            │
+│    k3s.role = "server";         ← NixOS option             │
+│  };                                                          │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     Cluster Modules                          │
+│                                                              │
+│  cluster-modules/k3s.nix      → modules/nixos/nix8s-k3s.nix │
+│  cluster-modules/sops.nix                                    │
+│  cluster-modules/cozystack.nix                               │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   NixOS Configurations                       │
+│                                                              │
+│  nixosConfigurations.node1    (server, --cluster-init)      │
+│  nixosConfigurations.node2    (server)                       │
+│  nixosConfigurations.worker1  (agent)                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Cluster Modules
+
+### k3s
+
+Configures k3s server/agent based on `k3s.role`:
+
+```nix
+k3s.enable = true;
+
+members.node1.k3s.role = "server";  # First server gets --cluster-init
+members.node2.k3s.role = "server";
+members.worker1.k3s.role = "agent";
+```
+
+### sops
+
+Manages encrypted secrets with age:
+
+```nix
+sops.enable = true;
+sops.secretsDir = "secrets";  # default
+
+# Generated files:
+# secrets/<cluster>.yaml      - encrypted secrets
+# secrets/<cluster>.age.key   - age private key (gitignored)
+# secrets/<cluster>.age.pub   - age public key
+# secrets/<cluster>_ssh       - SSH private key (gitignored)
+# secrets/<cluster>_ssh.pub   - SSH public key
+```
+
+### cozystack
+
+Deploys [Cozystack](https://cozystack.io) platform:
+
+```nix
+cozystack = {
+  enable = true;
+  publishing.host = "cozy.example.com";
+  variant = "isp-full-generic";  # default
+  networking = {
+    podCIDR = "10.42.0.0/16";
+    serviceCIDR = "10.43.0.0/16";
+  };
+};
+```
+
+Automatically adds required k3s flags, sysctl settings, packages.
+
+## Writing Cluster Modules
+
+See [docs/cluster-modules.md](docs/cluster-modules.md) for guidelines.
+
+Key concepts:
+
+1. **Cluster module** defines cluster-level options and adds NixOS modules
+2. **NixOS module** receives `nix8s` context with cluster/member info
+3. **Member options** are NixOS options set as patches in cluster config
+
+```nix
+# cluster-modules/mymodule.nix
+{ lib, config, ... }:
+{
+  options.mymodule.enable = lib.mkEnableOption "My module";
+
+  config = lib.mkIf config.mymodule.enable {
+    _generatedNixosModules = lib.genAttrs (lib.attrNames config.members) (_:
+      [ ../modules/nixos/mymodule.nix ]
+    );
+  };
+}
+```
+
+```nix
+# modules/nixos/mymodule.nix
+{ config, lib, nix8s, ... }:
+let
+  cluster = nix8s.cluster;
+  member = nix8s.member;
+  memberName = nix8s.memberName;
+in
+{
+  # NixOS configuration based on cluster context
+}
+```
+
+## Secrets Workflow
+
+```bash
+# Generate secrets (age keypair, SSH keypair, k3s tokens)
+nix run .#nix8sctl -- prod gen-secrets
+
+# Edit encrypted secrets
+nix run .#nix8sctl -- prod edit-secrets
+
+# Show decrypted secrets
+nix run .#nix8sctl -- prod show-secrets
+```
+
+## Deployment Workflow
+
+```bash
+# 1. Generate secrets
+nix run .#nix8sctl -- prod gen-secrets
+
+# 2. Deploy nodes (first server first)
+nix run .#nix8sctl -- prod apply node1
+nix run .#nix8sctl -- prod apply node2
+nix run .#nix8sctl -- prod apply worker1
+
+# 3. Fetch kubeconfig
+nix run .#nix8sctl -- prod kubeconfig fetch
+export KUBECONFIG=kubeconfig/prod.yaml
+
+# 4. Bootstrap cozystack (if enabled)
+nix run .#nix8sctl -- prod cozystack-bootstrap
+
+# 5. Check status
+kubectl get nodes
+nix run .#nix8sctl -- prod cozystack-status
+```
 
 ## License
 
