@@ -111,6 +111,12 @@
             install.mac = "aa:bb:cc:dd:ee:01";  # auto-provision by MAC
             install.disk = "/dev/sda";
             k3s.role = "server";
+            # Storage: dedicated disks for LINSTOR
+            cozystack.storage = {
+              disks = [ "/dev/sdb" ];
+              poolName = "data";
+              poolType = "zfs";
+            };
           };
 
           members.node2 = {
@@ -119,6 +125,8 @@
             install.mac = "aa:bb:cc:dd:ee:02";
             install.disk = "/dev/sda";
             k3s.role = "server";
+            # Storage: dedicated disks
+            cozystack.storage.disks = [ "/dev/sdb" ];
           };
 
           members.worker1 = {
@@ -127,6 +135,11 @@
             install.mac = "aa:bb:cc:dd:ee:03";
             install.disk = "/dev/sda";
             k3s.role = "agent";
+            # Storage: partition on system disk (single-disk mode)
+            cozystack.storage.systemPartition = {
+              enable = true;
+              size = "400G";
+            };
           };
         };
       };
