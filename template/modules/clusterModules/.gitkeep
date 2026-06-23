@@ -1,0 +1,16 @@
+# Custom cluster modules go here.
+#
+# A file in this directory should write to the top-level `clusterModules`
+# output, e.g.:
+#
+#   # modules/clusterModules/my-custom.nix
+#   { ... }:
+#   {
+#     flake.clusterModules.my-custom = ./impl/my-custom.nix;
+#   }
+#
+# Then import it explicitly in a cluster:
+#
+#   nixcluster.example = { clusterModules, ... }: {
+#     imports = [ clusterModules.my-custom ];
+#   };

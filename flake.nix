@@ -5,6 +5,8 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     disko.url = "github:nix-community/disko";
     sops-nix.url = "github:Mic92/sops-nix";
+    flake-parts.url = "github:hercules-ci/flake-parts";
+    import-tree.url = "github:vic/import-tree";
 
     disko.inputs.nixpkgs.follows = "nixpkgs";
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
@@ -29,16 +31,19 @@
       # Export library functions
       lib = nixclusterLib;
 
-      # Export cluster modules
-      clusterModules = {
-        core = ./cluster-modules/core.nix;
-        disko = ./cluster-modules/disko.nix;
-        k3s = ./cluster-modules/k3s.nix;
-        sops = ./cluster-modules/sops.nix;
-        cozystack = ./cluster-modules/cozystack.nix;
-        pxe = ./cluster-modules/pxe.nix;
-        incus = ./cluster-modules/incus.nix;
+      # Export built-in cluster modules (applied only via explicit imports).
+      clusterModules = nixclusterLib.builtinClusterModules;
+
+      # flake-parts module for the declarative `nixcluster` option (task 01).
+      flakeModules.nixcluster = nixclusterLib.flakeModule;
+      flakeModules.default = nixclusterLib.flakeModule;
+
+      # Downstream flake template (task 02): flake-parts + import-tree + ./modules.
+      templates.default = {
+        path = ./template;
+        description = "nixcluster downstream flake (flake-parts + import-tree)";
       };
+      templates.nixcluster = self.templates.default;
 
       # Packages
       packages = forAllSystems ({ pkgs, ... }: {
