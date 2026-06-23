@@ -21,6 +21,7 @@ rec {
     pxe = ../cluster-modules/pxe.nix;
     incus = ../cluster-modules/incus.nix;
     nebula = ../cluster-modules/nebula.nix;
+    keepalived = ../cluster-modules/keepalived.nix;
   };
 
   # flake-parts module providing the declarative `nixcluster` option.
