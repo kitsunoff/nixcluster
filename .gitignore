@@ -1,6 +1,7 @@
 # Private keys - NEVER commit
 secrets/*.age.key
 secrets/*_ssh
+secrets/*.nebula-ca.key
 
 # Local dev-stand test flakes (absolute paths / stand-specific IPs)
 tests/
