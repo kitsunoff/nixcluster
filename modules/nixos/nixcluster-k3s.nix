@@ -7,6 +7,10 @@ let
   cluster = nixcluster.cluster;
   memberName = nixcluster.memberName;
 
+  # Whether the cluster uses sops; if so, the join token is consumed from a
+  # runtime path (/run/secrets) rather than being placed in the nix store (I2).
+  sopsEnabled = cluster.sops.enable or false;
+
   # Get all servers from cluster members
   allMembers = cluster.members;
   servers = lib.filterAttrs (n: m: m.k3s.role or null == "server") allMembers;
@@ -64,9 +68,20 @@ in
       serverAddr = lib.mkIf (!isFirst && cfg.role == "agent" || !isFirst && cfg.role == "server")
         "https://${firstServerIp}:6443";
 
+      # Shared cluster join token from sops (runtime path, never a value in the
+      # store) so HA servers and agents can join. Fixes the verify-notes finding
+      # that the generated k3s token was never consumed.
+      tokenFile = lib.mkIf sopsEnabled config.sops.secrets."k3s/token".path;
+
       extraFlags = lib.mkDefault (lib.concatStringsSep " " (
         if cfg.role == "server" then serverFlags else agentFlags
       ));
+    };
+
+    # Declare the sops secret consumed above (sops-nix decrypts it to
+    # /run/secrets/k3s/token on activation).
+    sops.secrets = lib.mkIf sopsEnabled {
+      "k3s/token" = { };
     };
 
     networking.firewall = {

@@ -1,5 +1,12 @@
 # SOPS cluster extension module
-# Adds sops options and generates NixOS modules for secret management
+# Adds sops options and generates NixOS modules for secret management.
+#
+# Secrets are contributed by PROVIDERS (task 10): each cluster module registers
+# `sops.providers.<name>.generate` returning { "<secret/key>" = "<bash script
+# printing the value to stdout>"; }. `sops gen` collects all providers, runs the
+# snippets, and merges the values into the encrypted secrets/<cluster>.yaml.
+# age keypair + .sops.yaml + the operator ssh keypair stay core (encryption /
+# access infrastructure, not module data-secrets).
 { lib, config, ... }:
 
 let
@@ -14,7 +21,9 @@ let
   sshPubFile = "${cfg.secretsDir}/${clusterName}_ssh.pub";
   sopsConfigFile = "${cfg.secretsDir}/.sops.yaml";
 
-  # Generate NixOS module for sops-enabled members
+  # Generate NixOS module for sops-enabled members.
+  # NOTE (invariant I3): the age PRIVATE key is delivered to the node at install
+  # time via `install --extra-files` (see task 04), never through the nix store.
   mkSopsNixosModule = memberName: member:
     { config, pkgs, ... }: {
       sops = {
@@ -40,6 +49,25 @@ in
       default = "/etc/age/key.txt";
       description = "Path to the age private key on target systems";
     };
+
+    # Provider registry (task 10). Cluster modules register secret generators
+    # here; they are merged by the module system across all active modules.
+    providers = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule {
+        options.generate = lib.mkOption {
+          type = lib.types.functionTo (lib.types.attrsOf lib.types.str);
+          default = _: {};
+          description = ''
+            Function { pkgs, cluster, ... } -> { "<secret/key>" = "<bash script
+            that PRINTS the secret value to stdout>"; }. Keys use `/` for YAML
+            nesting (e.g. "k3s/token" -> k3s.token). Multi-line values (keys,
+            certs) are printed in full and stored as YAML block scalars.
+          '';
+        };
+      });
+      default = {};
+      description = "Secret providers contributed by cluster modules.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -53,11 +81,30 @@ in
       description = "Secret management (sops)";
       actions = {
       gen = {
-        description = "Generate cluster secrets";
+        description = "Generate/merge cluster secrets from providers";
         builder = { pkgs, cluster, ... }:
+          let
+            # Collect provider-contributed secrets: { "<secret/key>" = script; }
+            providerSecrets = lib.foldl'
+              (acc: provider: acc // (provider.generate { inherit pkgs cluster; }))
+              {}
+              (lib.attrValues (cluster.sops.providers or {}));
+
+            # Emit a shell function per secret + an ensure_secret call.
+            secretShell = lib.concatStringsSep "\n" (lib.mapAttrsToList (key: script:
+              let
+                fn = "gen_" + (lib.replaceStrings [ "/" "-" "." ] [ "_" "_" "_" ] key);
+                dotPath = "." + (lib.replaceStrings [ "/" ] [ "." ] key);
+              in ''
+                ${fn}() {
+                  ${script}
+                }
+                ensure_secret "${dotPath}" ${fn}
+              '') providerSecrets);
+          in
           pkgs.writeShellApplication {
             name = "nixclusterctl-${clusterName}-gen-secrets";
-            runtimeInputs = with pkgs; [ coreutils openssh age sops ];
+            runtimeInputs = with pkgs; [ coreutils openssh age sops yq-go ];
             text = ''
               set -euo pipefail
 
@@ -72,102 +119,88 @@ in
               SOPS_CONFIG="${sopsConfigFile}"
 
               mkdir -p "$SECRETS_DIR"
+              export SOPS_AGE_KEY_FILE="$AGE_KEY_FILE"
 
-              # Check for existing files
-              if [[ -f "$AGE_KEY_FILE" && "$FORCE" != "--force" ]]; then
-                echo "Warning: Secrets already exist for cluster '${clusterName}'!"
-                echo "Files: $AGE_KEY_FILE, $SECRETS_FILE"
-                read -r -p "Overwrite all? [y/N] " response
-                if [[ ! "$response" =~ ^[Yy]$ ]]; then
-                  echo "Aborted."
-                  exit 1
-                fi
+              # --- age keypair (encryption infra, regenerate only if missing/--force) ---
+              if [[ ! -f "$AGE_KEY_FILE" || "$FORCE" == "--force" ]]; then
+                echo "[age] generating keypair"
+                rm -f "$AGE_KEY_FILE" "$AGE_PUB_FILE"
+                age-keygen 2>&1 | tee "$AGE_KEY_FILE.tmp" >/dev/null
+                grep "AGE-SECRET-KEY-" "$AGE_KEY_FILE.tmp" > "$AGE_KEY_FILE"
+                grep "public key:" "$AGE_KEY_FILE.tmp" | cut -d: -f2 | tr -d ' ' > "$AGE_PUB_FILE"
+                rm "$AGE_KEY_FILE.tmp"
+                chmod 600 "$AGE_KEY_FILE"
+                AGE_PUB_KEY=$(cat "$AGE_PUB_FILE")
+                cat > "$SOPS_CONFIG" << EOF
+              # SOPS configuration for nixcluster secrets
+              # Auto-generated by: nixclusterctl ${clusterName} sops gen
+              keys:
+                - &${clusterName} $AGE_PUB_KEY
+              creation_rules:
+                - path_regex: ${clusterName}\\.yaml$
+                  key_groups:
+                    - age:
+                        - *${clusterName}
+              EOF
+              else
+                echo "[age] keeping existing keypair"
+              fi
+              AGE_PUB_KEY=$(cat "$AGE_PUB_FILE")
+              echo "[age] public key: $AGE_PUB_KEY"
+
+              # --- operator ssh keypair (access infra, regenerate only if missing/--force) ---
+              if [[ ! -f "$SSH_KEY_FILE" || "$FORCE" == "--force" ]]; then
+                echo "[ssh] generating keypair"
+                rm -f "$SSH_KEY_FILE" "$SSH_PUB_FILE"
+                ssh-keygen -t ed25519 -f "$SSH_KEY_FILE" -N "" -C "nixcluster-${clusterName}" -q
+                chmod 600 "$SSH_KEY_FILE"
+              else
+                echo "[ssh] keeping existing keypair"
+              fi
+              SSH_PUB_KEY=$(cat "$SSH_PUB_FILE")
+
+              # --- working plaintext (decrypt existing for merge, unless --force) ---
+              WORK=$(mktemp)
+              # shellcheck disable=SC2064
+              trap "rm -f '$WORK'" EXIT
+              if [[ -f "$SECRETS_FILE" && "$FORCE" != "--force" ]]; then
+                echo "[merge] decrypting existing secrets to add only missing keys"
+                sops --config "$SOPS_CONFIG" --decrypt "$SECRETS_FILE" > "$WORK"
+              else
+                echo "{}" > "$WORK"
               fi
 
-              echo "Generating secrets for cluster '${clusterName}'..."
-              echo ""
+              # ssh public key (core data secret)
+              VAL="$SSH_PUB_KEY" yq -i '.ssh.publicKey = strenv(VAL)' "$WORK"
 
-              # 1. Generate age keypair
-              echo "[1/5] Generating age keypair..."
-              rm -f "$AGE_KEY_FILE" "$AGE_PUB_FILE"
-              age-keygen 2>&1 | tee "$AGE_KEY_FILE.tmp"
-              grep "AGE-SECRET-KEY-" "$AGE_KEY_FILE.tmp" > "$AGE_KEY_FILE"
-              grep "public key:" "$AGE_KEY_FILE.tmp" | cut -d: -f2 | tr -d ' ' > "$AGE_PUB_FILE"
-              rm "$AGE_KEY_FILE.tmp"
-              chmod 600 "$AGE_KEY_FILE"
-              AGE_PUB_KEY=$(cat "$AGE_PUB_FILE")
-              echo "       Age public key: $AGE_PUB_KEY"
+              # ensure_secret <dotpath> <generator-fn>: set only if missing (or --force)
+              ensure_secret() {
+                local dotpath="$1" fn="$2" cur val
+                if [[ "$FORCE" != "--force" ]]; then
+                  cur=$(yq "$dotpath" "$WORK" 2>/dev/null || echo "null")
+                  if [[ -n "$cur" && "$cur" != "null" ]]; then
+                    echo "  keep   $dotpath"
+                    return 0
+                  fi
+                fi
+                val=$("$fn")
+                VAL="$val" yq -i "$dotpath = strenv(VAL)" "$WORK"
+                echo "  set    $dotpath"
+              }
 
-              # 2. Generate SSH keypair
-              echo "[2/5] Generating SSH keypair..."
-              rm -f "$SSH_KEY_FILE" "$SSH_PUB_FILE"
-              ssh-keygen -t ed25519 -f "$SSH_KEY_FILE" -N "" -C "nixcluster-${clusterName}" -q
-              chmod 600 "$SSH_KEY_FILE"
-              SSH_PUB_KEY=$(cat "$SSH_PUB_FILE")
-              echo "       SSH public key: ''${SSH_PUB_KEY:0:50}..."
+              echo "[providers] collecting secrets"
+              ${secretShell}
 
-              # 3. Generate k3s tokens
-              echo "[3/5] Generating k3s tokens..."
-              TOKEN=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 48)
-              AGENT_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 48)
-              echo "       Generated 2 tokens"
-
-              # 4. Create/update .sops.yaml configuration
-              echo "[4/5] Creating .sops.yaml..."
-              cat > "$SOPS_CONFIG" << EOF
-            # SOPS configuration for nixcluster secrets
-            # Auto-generated by: nixclusterctl ${clusterName} gen-secrets
-
-            keys:
-              - &${clusterName} $AGE_PUB_KEY
-
-            creation_rules:
-              - path_regex: ${clusterName}\\.yaml$
-                key_groups:
-                  - age:
-                      - *${clusterName}
-            EOF
-
-              # 5. Create and encrypt secrets
-              echo "[5/5] Creating and encrypting secrets..."
-              PLAIN_FILE=$(mktemp)
-              cat > "$PLAIN_FILE" << EOF
-            # Cluster secrets for ${clusterName}
-            # Edit with: nixclusterctl ${clusterName} edit-secrets
-
-            k3s:
-              token: $TOKEN
-              agentToken: $AGENT_TOKEN
-
-            ssh:
-              publicKey: "$SSH_PUB_KEY"
-            EOF
-
-              export SOPS_AGE_KEY_FILE="$AGE_KEY_FILE"
+              # --- encrypt ---
+              echo "[encrypt] writing $SECRETS_FILE"
               ENCRYPTED_FILE=$(mktemp)
-              sops --config "$SOPS_CONFIG" --filename-override "$SECRETS_FILE" --encrypt "$PLAIN_FILE" > "$ENCRYPTED_FILE"
+              sops --config "$SOPS_CONFIG" --filename-override "$SECRETS_FILE" --encrypt "$WORK" > "$ENCRYPTED_FILE"
               mv "$ENCRYPTED_FILE" "$SECRETS_FILE"
-              rm "$PLAIN_FILE"
 
               echo ""
-              echo "=========================================="
-              echo "Secrets generated successfully!"
-              echo "=========================================="
-              echo ""
-              echo "Created files:"
-              echo "  $AGE_KEY_FILE   - age private key (NEVER COMMIT)"
-              echo "  $AGE_PUB_FILE   - age public key"
-              echo "  $SSH_KEY_FILE   - SSH private key (NEVER COMMIT)"
-              echo "  $SSH_PUB_FILE   - SSH public key"
-              echo "  $SECRETS_FILE   - encrypted secrets (safe to commit)"
-              echo "  $SOPS_CONFIG    - sops configuration"
-              echo ""
-              echo "Next steps:"
-              echo "  1. Commit public files:"
-              echo "     git add $AGE_PUB_FILE $SSH_PUB_FILE $SECRETS_FILE $SOPS_CONFIG"
-              echo ""
-              echo "  2. Connect to nodes:"
-              echo "     ssh -i $SSH_KEY_FILE root@<node-ip>"
+              echo "Secrets ready: $SECRETS_FILE (encrypted, safe to commit)"
+              echo "Private keys (NEVER commit, gitignored): $AGE_KEY_FILE, $SSH_KEY_FILE"
+              echo "Commit: git add $AGE_PUB_FILE $SSH_PUB_FILE $SECRETS_FILE $SOPS_CONFIG"
             '';
           };
       };
@@ -185,7 +218,7 @@ in
 
               if [[ ! -f "$SECRETS_FILE" ]]; then
                 echo "Secrets file not found: $SECRETS_FILE"
-                echo "Use 'gen-secrets' to create."
+                echo "Use 'sops gen' to create."
                 exit 1
               fi
 

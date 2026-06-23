@@ -1,6 +1,6 @@
 # k3s cluster extension module
 # Adds k3s NixOS module to all members and provides CLI commands
-{ lib, config, ... }:
+{ lib, config, options, ... }:
 
 let
   cfg = config.k3s;
@@ -85,16 +85,27 @@ in
     enable = lib.mkEnableOption "k3s cluster";
   };
 
-  config = lib.mkIf cfg.enable {
-    # Add k3s NixOS module to ALL members
-    _generatedNixosModules = lib.genAttrs (lib.attrNames config.members) (_:
-      [ k3sNixosModule ]
-    );
+  config = lib.mkIf cfg.enable (lib.mkMerge [
+    {
+      # Add k3s NixOS module to ALL members
+      _generatedNixosModules = lib.genAttrs (lib.attrNames config.members) (_:
+        [ k3sNixosModule ]
+      );
 
-    # Add CLI commands only if we have k3s members (group `k3s`)
-    commandGroups.k3s = lib.mkIf (allK3sMembers != []) {
-      description = "k3s cluster management";
-      actions = k3sCommands;
-    };
-  };
+      # Add CLI commands only if we have k3s members (group `k3s`)
+      commandGroups.k3s = lib.mkIf (allK3sMembers != []) {
+        description = "k3s cluster management";
+        actions = k3sCommands;
+      };
+    }
+
+    # Register the k3s secret provider when sops is in use (task 10). Guarded by
+    # option presence so k3s works without the sops module imported.
+    (lib.optionalAttrs (options ? sops) {
+      sops.providers.k3s.generate = { ... }: {
+        "k3s/token" = "head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 48";
+        "k3s/agentToken" = "head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 48";
+      };
+    })
+  ]);
 }
