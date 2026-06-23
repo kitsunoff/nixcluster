@@ -1,9 +1,9 @@
 # Cluster Modules Guide
 
-Cluster modules extend nix8s clusters with additional functionality. They can:
+Cluster modules extend nixcluster clusters with additional functionality. They can:
 - Define cluster-level options
 - Generate NixOS modules for cluster members
-- Add CLI commands to nix8sctl
+- Add CLI commands to nixclusterctl
 
 ## Architecture
 
@@ -36,10 +36,10 @@ Cluster modules extend nix8s clusters with additional functionality. They can:
 ┌─────────────────────────────────────────────────────────────┐
 │                      NixOS Modules                           │
 │  ┌──────────────────┐                                       │
-│  │ modules/nixos/   │  Receive nix8s context:               │
-│  │   nix8s-k3s.nix  │  • nix8s.cluster   - full cluster    │
-│  │                  │  • nix8s.member    - current member  │
-│  │                  │  • nix8s.memberName                   │
+│  │ modules/nixos/   │  Receive nixcluster context:               │
+│  │   nixcluster-k3s.nix  │  • nixcluster.cluster   - full cluster    │
+│  │                  │  • nixcluster.member    - current member  │
+│  │                  │  • nixcluster.memberName                   │
 │  └──────────────────┘                                       │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -84,7 +84,7 @@ in
         description = "Do something";
         builder = { pkgs, cluster, ... }:
           pkgs.writeShellApplication {
-            name = "nix8sctl-${clusterName}-my-command";
+            name = "nixclusterctl-${clusterName}-my-command";
             text = ''echo "Hello from ${clusterName}"'';
           };
       };
@@ -97,13 +97,13 @@ in
 
 ```nix
 # modules/nixos/mymodule.nix
-{ config, lib, pkgs, nix8s, ... }:
+{ config, lib, pkgs, nixcluster, ... }:
 
 let
   # Access cluster context
-  cluster = nix8s.cluster;
-  member = nix8s.member;
-  memberName = nix8s.memberName;
+  cluster = nixcluster.cluster;
+  member = nixcluster.member;
+  memberName = nixcluster.memberName;
 
   # Read member-specific options (these are NixOS patches from cluster config)
   myRole = member.mymodule.role or null;
@@ -153,23 +153,23 @@ members.node1 = {
 };
 ```
 
-### 2. The `nix8s` Module Argument
+### 2. The `nixcluster` Module Argument
 
 Every NixOS module added via `_generatedNixosModules` receives:
 
 | Argument | Description |
 |----------|-------------|
-| `nix8s.cluster` | Full evaluated cluster config |
-| `nix8s.member` | Current member's config (from `cluster.members.<name>`) |
-| `nix8s.memberName` | Name of current member (e.g., "node1") |
-| `nix8s.clusterName` | Cluster name |
+| `nixcluster.cluster` | Full evaluated cluster config |
+| `nixcluster.member` | Current member's config (from `cluster.members.<name>`) |
+| `nixcluster.memberName` | Name of current member (e.g., "node1") |
+| `nixcluster.clusterName` | Cluster name |
 
 ### 3. Discovering Other Members
 
 ```nix
 # In NixOS module:
 let
-  cluster = nix8s.cluster;
+  cluster = nixcluster.cluster;
 
   # Find all servers
   servers = lib.filterAttrs
@@ -190,9 +190,9 @@ Modules can read options from other modules:
 
 ```nix
 # cozystack module reading k3s member roles:
-cozystackNixosModule = { config, lib, nix8s, ... }:
+cozystackNixosModule = { config, lib, nixcluster, ... }:
   let
-    member = nix8s.member;
+    member = nixcluster.member;
     role = member.k3s.role or null;  # Read k3s role
     isServer = role == "server";
   in
@@ -225,7 +225,7 @@ k3s.extraServerFlags = lib.mkAfter [ "--my-flag" ];
 
 let
   cfg = config.k3s;
-  k3sNixosModule = ../modules/nixos/nix8s-k3s.nix;
+  k3sNixosModule = ../modules/nixos/nixcluster-k3s.nix;
 
   # Discover members with k3s.role set
   k3sMembers = lib.filterAttrs
@@ -249,7 +249,7 @@ in
       bootstrap = {
         description = "Bootstrap k3s cluster";
         builder = { pkgs, ... }: pkgs.writeShellApplication {
-          name = "nix8sctl-${config.name}-bootstrap";
+          name = "nixclusterctl-${config.name}-bootstrap";
           text = ''echo "Servers: ${toString servers}"'';
         };
       };
@@ -259,13 +259,13 @@ in
 ```
 
 ```nix
-# modules/nixos/nix8s-k3s.nix
-{ config, lib, nix8s, ... }:
+# modules/nixos/nixcluster-k3s.nix
+{ config, lib, nixcluster, ... }:
 
 let
-  cluster = nix8s.cluster;
-  member = nix8s.member;
-  memberName = nix8s.memberName;
+  cluster = nixcluster.cluster;
+  member = nixcluster.member;
+  memberName = nixcluster.memberName;
 
   role = config.k3s.role;
   memberIp = member.install.ip or "127.0.0.1";

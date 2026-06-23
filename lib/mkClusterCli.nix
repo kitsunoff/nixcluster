@@ -1,6 +1,6 @@
 # mkClusterCli - Build CLI subcommand for a cluster
 #
-# Returns a package that handles: nix8sctl <cluster> <command> [args...]
+# Returns a package that handles: nixclusterctl <cluster> <command> [args...]
 { lib }:
 
 { pkgs, cluster }:
@@ -15,14 +15,14 @@ let
       description = "Apply config to member";
       builder = { pkgs, cluster, ... }:
         pkgs.writeShellApplication {
-          name = "nix8sctl-${clusterName}-apply";
+          name = "nixclusterctl-${clusterName}-apply";
           runtimeInputs = with pkgs; [ nixos-rebuild openssh ];
           text = ''
             MEMBER="''${1:-}"
             IP="''${2:-}"
 
             if [[ -z "$MEMBER" ]]; then
-              echo "Usage: nix8sctl ${clusterName} apply <member> [ip]"
+              echo "Usage: nixclusterctl ${clusterName} apply <member> [ip]"
               echo "Members: ${lib.concatStringsSep ", " memberNames}"
               exit 1
             fi
@@ -74,11 +74,11 @@ let
 
 in
 pkgs.writeShellApplication {
-  name = "nix8sctl-${clusterName}";
+  name = "nixclusterctl-${clusterName}";
   text = ''
     show_help() {
       cat << 'EOF'
-    nix8sctl ${clusterName}
+    nixclusterctl ${clusterName}
 
     Commands:
     ${helpText}

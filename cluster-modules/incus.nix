@@ -20,7 +20,7 @@ let
   clusterName = config.name;
 
   # NixOS module that configures the Incus daemon + idempotent preseed.
-  incusNixosModule = ../modules/nixos/nix8s-incus.nix;
+  incusNixosModule = ../modules/nixos/nixcluster-incus.nix;
 
   # Members that have Incus activated (via NixOS option incus.enable as a patch).
   incusMembers = lib.filterAttrs
@@ -35,7 +35,7 @@ let
       description = "Show Incus status on cluster nodes";
       builder = { pkgs, cluster, ... }:
         pkgs.writeShellApplication {
-          name = "nix8sctl-${clusterName}-incus-status";
+          name = "nixclusterctl-${clusterName}-incus-status";
           runtimeInputs = with pkgs; [ openssh coreutils ];
           text = ''
             set -uo pipefail
@@ -61,7 +61,7 @@ let
       description = "Re-apply Incus preseed (idempotent) on cluster nodes";
       builder = { pkgs, cluster, ... }:
         pkgs.writeShellApplication {
-          name = "nix8sctl-${clusterName}-incus-init";
+          name = "nixclusterctl-${clusterName}-incus-init";
           runtimeInputs = with pkgs; [ openssh coreutils ];
           text = ''
             set -uo pipefail

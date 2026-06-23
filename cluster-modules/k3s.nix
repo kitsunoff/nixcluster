@@ -7,7 +7,7 @@ let
   clusterName = config.name;
 
   # Import NixOS module path
-  k3sNixosModule = ../modules/nixos/nix8s-k3s.nix;
+  k3sNixosModule = ../modules/nixos/nixcluster-k3s.nix;
 
   # Get k3s members from members config (via k3s.role NixOS option)
   k3sMembers = lib.filterAttrs
@@ -31,7 +31,7 @@ let
       description = "Bootstrap k3s cluster";
       builder = { pkgs, cluster, ... }:
         pkgs.writeShellApplication {
-          name = "nix8sctl-${clusterName}-bootstrap";
+          name = "nixclusterctl-${clusterName}-bootstrap";
           text = ''
             echo "Bootstrapping k3s cluster '${clusterName}'"
             echo ""
@@ -40,9 +40,9 @@ let
             echo "First server: ${toString firstServer}"
             echo ""
             echo "Deploy order:"
-            echo "  1. nix8sctl ${clusterName} apply ${toString firstServer}"
-            ${lib.concatMapStringsSep "\n" (s: ''echo "  2. nix8sctl ${clusterName} apply ${s}"'') (lib.filter (s: s != firstServer) servers)}
-            ${lib.concatMapStringsSep "\n" (a: ''echo "  3. nix8sctl ${clusterName} apply ${a}"'') agents}
+            echo "  1. nixclusterctl ${clusterName} apply ${toString firstServer}"
+            ${lib.concatMapStringsSep "\n" (s: ''echo "  2. nixclusterctl ${clusterName} apply ${s}"'') (lib.filter (s: s != firstServer) servers)}
+            ${lib.concatMapStringsSep "\n" (a: ''echo "  3. nixclusterctl ${clusterName} apply ${a}"'') agents}
           '';
         };
     };
@@ -51,7 +51,7 @@ let
       description = "Fetch kubeconfig";
       builder = { pkgs, cluster, ... }:
         pkgs.writeShellApplication {
-          name = "nix8sctl-${clusterName}-kubeconfig";
+          name = "nixclusterctl-${clusterName}-kubeconfig";
           runtimeInputs = with pkgs; [ openssh coreutils ];
           text = ''
             ACTION="''${1:-fetch}"

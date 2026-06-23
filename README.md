@@ -6,7 +6,7 @@ Declarative NixOS-based Kubernetes cluster management with module system.
 
 - **Cluster Modules** — extensible architecture for k3s, sops, cozystack
 - **NixOS Integration** — cluster config generates NixOS configurations
-- **CLI Tool** — `nix8sctl` for managing clusters
+- **CLI Tool** — `nixclusterctl` for managing clusters
 - **Secrets Management** — sops-based encrypted secrets with age
 
 ## Quick Start
@@ -17,13 +17,13 @@ git clone https://github.com/kitsunoff/nixcluster
 cd nixcluster
 
 # Generate cluster secrets
-nix run .#nix8sctl -- dev gen-secrets
+nix run .#nixclusterctl -- dev gen-secrets
 
 # Show cluster info
-nix run .#nix8sctl -- dev
+nix run .#nixclusterctl -- dev
 
 # Bootstrap cluster (shows deploy order)
-nix run .#nix8sctl -- dev bootstrap
+nix run .#nixclusterctl -- dev bootstrap
 ```
 
 ## Cluster Configuration
@@ -70,7 +70,7 @@ clusterConfigurations.prod = mkCluster {
 ## CLI Commands
 
 ```bash
-nix run .#nix8sctl -- <cluster> <command> [args]
+nix run .#nixclusterctl -- <cluster> <command> [args]
 
 # Available commands:
 #   apply              - Apply config to member
@@ -103,7 +103,7 @@ nix run .#nix8sctl -- <cluster> <command> [args]
 ┌─────────────────────────────────────────────────────────────┐
 │                     Cluster Modules                          │
 │                                                              │
-│  cluster-modules/k3s.nix      → modules/nixos/nix8s-k3s.nix │
+│  cluster-modules/k3s.nix      → modules/nixos/nixcluster-k3s.nix │
 │  cluster-modules/sops.nix                                    │
 │  cluster-modules/cozystack.nix                               │
 └─────────────────────────────────────────────────────────────┘
@@ -173,7 +173,7 @@ See [docs/cluster-modules.md](docs/cluster-modules.md) for guidelines.
 Key concepts:
 
 1. **Cluster module** defines cluster-level options and adds NixOS modules
-2. **NixOS module** receives `nix8s` context with cluster/member info
+2. **NixOS module** receives `nixcluster` context with cluster/member info
 3. **Member options** are NixOS options set as patches in cluster config
 
 ```nix
@@ -192,11 +192,11 @@ Key concepts:
 
 ```nix
 # modules/nixos/mymodule.nix
-{ config, lib, nix8s, ... }:
+{ config, lib, nixcluster, ... }:
 let
-  cluster = nix8s.cluster;
-  member = nix8s.member;
-  memberName = nix8s.memberName;
+  cluster = nixcluster.cluster;
+  member = nixcluster.member;
+  memberName = nixcluster.memberName;
 in
 {
   # NixOS configuration based on cluster context
@@ -207,36 +207,36 @@ in
 
 ```bash
 # Generate secrets (age keypair, SSH keypair, k3s tokens)
-nix run .#nix8sctl -- prod gen-secrets
+nix run .#nixclusterctl -- prod gen-secrets
 
 # Edit encrypted secrets
-nix run .#nix8sctl -- prod edit-secrets
+nix run .#nixclusterctl -- prod edit-secrets
 
 # Show decrypted secrets
-nix run .#nix8sctl -- prod show-secrets
+nix run .#nixclusterctl -- prod show-secrets
 ```
 
 ## Deployment Workflow
 
 ```bash
 # 1. Generate secrets
-nix run .#nix8sctl -- prod gen-secrets
+nix run .#nixclusterctl -- prod gen-secrets
 
 # 2. Deploy nodes (first server first)
-nix run .#nix8sctl -- prod apply node1
-nix run .#nix8sctl -- prod apply node2
-nix run .#nix8sctl -- prod apply worker1
+nix run .#nixclusterctl -- prod apply node1
+nix run .#nixclusterctl -- prod apply node2
+nix run .#nixclusterctl -- prod apply worker1
 
 # 3. Fetch kubeconfig
-nix run .#nix8sctl -- prod kubeconfig fetch
+nix run .#nixclusterctl -- prod kubeconfig fetch
 export KUBECONFIG=kubeconfig/prod.yaml
 
 # 4. Bootstrap cozystack (if enabled)
-nix run .#nix8sctl -- prod cozystack-bootstrap
+nix run .#nixclusterctl -- prod cozystack-bootstrap
 
 # 5. Check status
 kubectl get nodes
-nix run .#nix8sctl -- prod cozystack-status
+nix run .#nixclusterctl -- prod cozystack-status
 ```
 
 ## License

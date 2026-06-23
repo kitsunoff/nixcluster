@@ -1,4 +1,4 @@
-# nix8s library
+# nixcluster library
 { lib, inputs }:
 
 {

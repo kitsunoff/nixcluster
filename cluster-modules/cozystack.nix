@@ -57,11 +57,11 @@ let
     config.members;
 
   # Single NixOS module for cozystack requirements
-  cozystackNixosModule = { config, pkgs, lib, nix8s, ... }:
+  cozystackNixosModule = { config, pkgs, lib, nixcluster, ... }:
     let
-      memberName = nix8s.memberName;
-      member = nix8s.member;
-      cluster = nix8s.cluster;
+      memberName = nixcluster.memberName;
+      member = nixcluster.member;
+      cluster = nixcluster.cluster;
       cozyCfg = cluster.cozystack;
 
       # Get role from member config (k3s is also NixOS option now)
@@ -293,7 +293,7 @@ in
         description = "Bootstrap cozystack on cluster";
         builder = { pkgs, cluster, ... }:
           pkgs.writeShellApplication {
-            name = "nix8sctl-${clusterName}-cozystack-bootstrap";
+            name = "nixclusterctl-${clusterName}-cozystack-bootstrap";
             runtimeInputs = with pkgs; [ kubectl coreutils curl ];
             text = ''
               set -euo pipefail
@@ -313,7 +313,7 @@ in
 
               if [[ ! -f "$KUBECONFIG" ]]; then
                 echo "ERROR: Kubeconfig not found: $KUBECONFIG"
-                echo "Run: nix8sctl ${clusterName} kubeconfig fetch"
+                echo "Run: nixclusterctl ${clusterName} kubeconfig fetch"
                 exit 1
               fi
 
@@ -376,7 +376,7 @@ PLATFORM_EOF
         description = "Show cozystack status";
         builder = { pkgs, cluster, ... }:
           pkgs.writeShellApplication {
-            name = "nix8sctl-${clusterName}-cozystack-status";
+            name = "nixclusterctl-${clusterName}-cozystack-status";
             runtimeInputs = with pkgs; [ kubectl ];
             text = ''
               KUBECONFIG="''${KUBECONFIG:-kubeconfig/${clusterName}.yaml}"
@@ -467,7 +467,7 @@ PLATFORM_EOF
 
           in
           pkgs.writeShellApplication {
-            name = "nix8sctl-${clusterName}-cozystack-init-storage";
+            name = "nixclusterctl-${clusterName}-cozystack-init-storage";
             runtimeInputs = with pkgs; [ kubectl ];
             text = ''
               set -euo pipefail
@@ -486,7 +486,7 @@ PLATFORM_EOF
               if ! kubectl get pods -n cozy-linstor -l app=linstor-controller 2>/dev/null | grep -q Running; then
                 echo "ERROR: LINSTOR controller is not running"
                 echo "Make sure cozystack is bootstrapped first:"
-                echo "  nix8sctl ${clusterName} cozystack-bootstrap"
+                echo "  nixclusterctl ${clusterName} cozystack-bootstrap"
                 exit 1
               fi
 

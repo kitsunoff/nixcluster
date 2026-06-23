@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nix8s PXE HTTP server with discovery API."""
+"""nixcluster PXE HTTP server with discovery API."""
 
 import http.server
 import json
@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 ASSETS_DIR = os.environ.get("ASSETS_DIR", ".")
-NODES_DIR = os.environ.get("NODES_DIR", "./nix8s/nodes")
+NODES_DIR = os.environ.get("NODES_DIR", "./nixcluster/nodes")
 
 
 def mac_to_filename(mac: str) -> str:
@@ -61,7 +61,7 @@ def generate_node_nix(data: dict) -> str:
 {{ ... }}:
 
 {{
-  nix8s.nodes."{node_name}" = {{
+  nixcluster.nodes."{node_name}" = {{
     network.mac = "{mac}";
     install.disk = "/dev/{first_disk}";
   }};
@@ -70,7 +70,7 @@ def generate_node_nix(data: dict) -> str:
 
 
 def list_discovered_nodes() -> dict:
-    """List all discovered nodes from nix8s/nodes/*.nix files."""
+    """List all discovered nodes from nixcluster/nodes/*.nix files."""
     nodes = {}
     nodes_path = Path(NODES_DIR)
     if not nodes_path.exists():

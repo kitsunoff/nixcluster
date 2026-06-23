@@ -1,10 +1,10 @@
 # mkFlakeOutputs - Generate flake outputs from clusterConfigurations
 #
 # Usage (standalone):
-#   inherit (nix8s.lib.mkFlakeOutputs { inherit self; }) nixosConfigurations apps;
+#   inherit (nixcluster.lib.mkFlakeOutputs { inherit self; }) nixosConfigurations apps;
 #
 # Usage (with explicit clusterConfigurations):
-#   outputs = nix8s.lib.mkFlakeOutputs { clusterConfigurations = ...; nixpkgs = ...; };
+#   outputs = nixcluster.lib.mkFlakeOutputs { clusterConfigurations = ...; nixpkgs = ...; };
 { lib, inputs }:
 
 { self ? null, clusterConfigurations ? null, nixpkgs ? inputs.nixpkgs }:
@@ -24,8 +24,8 @@ let
   # Supported systems
   systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
 
-  # Build nix8sctl for a system
-  mkNix8sctl = system:
+  # Build nixclusterctl for a system
+  mkNixclusterctl = system:
     let
       pkgs = nixpkgs.legacyPackages.${system};
 
@@ -49,19 +49,19 @@ let
         "  ${name} - ${memberCount} members${features}"
       ) clusters);
 
-      nix8sctl = pkgs.writeShellApplication {
-        name = "nix8sctl";
+      nixclusterctl = pkgs.writeShellApplication {
+        name = "nixclusterctl";
         text = ''
           show_help() {
             cat << 'EOF'
-          nix8sctl - Cluster management CLI
+          nixclusterctl - Cluster management CLI
 
-          Usage: nix8sctl <cluster> <command> [args...]
+          Usage: nixclusterctl <cluster> <command> [args...]
 
           Clusters:
           ${clusterList}
 
-          Use 'nix8sctl <cluster> --help' for commands.
+          Use 'nixclusterctl <cluster> --help' for commands.
           EOF
           }
 
@@ -76,11 +76,11 @@ let
     in
     {
       type = "app";
-      program = lib.getExe nix8sctl;
+      program = lib.getExe nixclusterctl;
     };
 
   apps = lib.genAttrs systems (system: {
-    nix8sctl = mkNix8sctl system;
+    nixclusterctl = mkNixclusterctl system;
   });
 
 in
