@@ -287,9 +287,11 @@ in
       [ cozystackNixosModule ]
     );
 
-    # CLI commands
-    commands = [{
-      cozystack-bootstrap = {
+    # CLI commands (group `cozystack`)
+    commandGroups.cozystack = {
+      description = "Cozystack platform management";
+      actions = {
+      bootstrap = {
         description = "Bootstrap cozystack on cluster";
         builder = { pkgs, cluster, ... }:
           pkgs.writeShellApplication {
@@ -313,7 +315,7 @@ in
 
               if [[ ! -f "$KUBECONFIG" ]]; then
                 echo "ERROR: Kubeconfig not found: $KUBECONFIG"
-                echo "Run: nixclusterctl ${clusterName} kubeconfig fetch"
+                echo "Run: nixclusterctl ${clusterName} k3s kubeconfig fetch"
                 exit 1
               fi
 
@@ -372,7 +374,7 @@ PLATFORM_EOF
           };
       };
 
-      cozystack-status = {
+      status = {
         description = "Show cozystack status";
         builder = { pkgs, cluster, ... }:
           pkgs.writeShellApplication {
@@ -403,7 +405,7 @@ PLATFORM_EOF
           };
       };
 
-      cozystack-init-storage = {
+      init-storage = {
         description = "Initialize LINSTOR storage pools on nodes";
         builder = { pkgs, cluster, ... }:
           let
@@ -486,7 +488,7 @@ PLATFORM_EOF
               if ! kubectl get pods -n cozy-linstor -l app=linstor-controller 2>/dev/null | grep -q Running; then
                 echo "ERROR: LINSTOR controller is not running"
                 echo "Make sure cozystack is bootstrapped first:"
-                echo "  nixclusterctl ${clusterName} cozystack-bootstrap"
+                echo "  nixclusterctl ${clusterName} cozystack bootstrap"
                 exit 1
               fi
 
@@ -520,6 +522,7 @@ PLATFORM_EOF
             '';
           };
       };
-    }];
+      };
+    };
   };
 }

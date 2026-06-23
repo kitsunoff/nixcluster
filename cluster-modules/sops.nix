@@ -48,9 +48,11 @@ in
       (name: member: [ (mkSopsNixosModule name member) ])
       config.members;
 
-    # CLI commands for sops management
-    commands = [{
-      gen-secrets = {
+    # CLI commands for sops management (group `sops`)
+    commandGroups.sops = {
+      description = "Secret management (sops)";
+      actions = {
+      gen = {
         description = "Generate cluster secrets";
         builder = { pkgs, cluster, ... }:
           pkgs.writeShellApplication {
@@ -170,7 +172,7 @@ in
           };
       };
 
-      edit-secrets = {
+      edit = {
         description = "Edit cluster secrets";
         builder = { pkgs, cluster, ... }:
           pkgs.writeShellApplication {
@@ -193,7 +195,7 @@ in
           };
       };
 
-      show-secrets = {
+      show = {
         description = "Show decrypted secrets";
         builder = { pkgs, cluster, ... }:
           pkgs.writeShellApplication {
@@ -214,6 +216,7 @@ in
             '';
           };
       };
-    }];
+      };
+    };
   };
 }

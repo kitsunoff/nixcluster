@@ -91,7 +91,10 @@ in
       [ k3sNixosModule ]
     );
 
-    # Add CLI commands only if we have k3s members
-    commands = lib.mkIf (allK3sMembers != []) [ k3sCommands ];
+    # Add CLI commands only if we have k3s members (group `k3s`)
+    commandGroups.k3s = lib.mkIf (allK3sMembers != []) {
+      description = "k3s cluster management";
+      actions = k3sCommands;
+    };
   };
 }
