@@ -20,6 +20,7 @@ rec {
     cozystack = ../cluster-modules/cozystack.nix;
     pxe = ../cluster-modules/pxe.nix;
     incus = ../cluster-modules/incus.nix;
+    nebula = ../cluster-modules/nebula.nix;
   };
 
   # flake-parts module providing the declarative `nixcluster` option.
