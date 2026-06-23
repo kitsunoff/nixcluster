@@ -77,6 +77,62 @@ let
           '';
         };
     };
+
+    nodes = {
+      description = "List cluster nodes (table; --json for raw)";
+      builder = { pkgs, lib, cluster, helpers, ... }:
+        pkgs.writeShellApplication {
+          name = "nixclusterctl-${clusterName}-k3s-nodes";
+          runtimeInputs = with pkgs; [ kubectl jq coreutils ];
+          text = ''
+            set -euo pipefail
+            export KUBECONFIG="kubeconfig/${clusterName}.yaml"
+            if [[ ! -f "$KUBECONFIG" ]]; then
+              echo "No kubeconfig. Run: nixclusterctl ${clusterName} k3s kubeconfig fetch" >&2
+              exit 1
+            fi
+            if [[ "''${1:-}" == "--json" ]]; then
+              exec kubectl get nodes -o json
+            fi
+            {
+              printf 'NAME\tSTATUS\tROLES\tVERSION\tINTERNAL-IP\n'
+              kubectl get nodes -o json | jq -r '
+                .items[] | [
+                  .metadata.name,
+                  ([.status.conditions[] | select(.type=="Ready") | .status] | join("")),
+                  ([.metadata.labels | to_entries[] | select(.key|test("node-role.kubernetes.io/")) | (.key|sub("node-role.kubernetes.io/";""))] | join(",")),
+                  .status.nodeInfo.kubeletVersion,
+                  ([.status.addresses[] | select(.type=="InternalIP") | .address] | join(""))
+                ] | @tsv'
+            } | ${lib.getExe helpers.tablefmt}
+          '';
+        };
+    };
+
+    manifest = {
+      description = "Manage deployed manifests (list | apply <file> | delete <file>)";
+      builder = { pkgs, cluster, ... }:
+        pkgs.writeShellApplication {
+          name = "nixclusterctl-${clusterName}-k3s-manifest";
+          runtimeInputs = with pkgs; [ kubectl ];
+          text = ''
+            set -euo pipefail
+            export KUBECONFIG="kubeconfig/${clusterName}.yaml"
+            if [[ ! -f "$KUBECONFIG" ]]; then
+              echo "No kubeconfig. Run: nixclusterctl ${clusterName} k3s kubeconfig fetch" >&2
+              exit 1
+            fi
+            SUB="''${1:-list}"
+            shift || true
+            case "$SUB" in
+              list)   kubectl get all --all-namespaces ;;
+              apply)  [[ -n "''${1:-}" ]] || { echo "usage: k3s manifest apply <file>" >&2; exit 1; }; kubectl apply --filename "$1" ;;
+              delete) [[ -n "''${1:-}" ]] || { echo "usage: k3s manifest delete <file>" >&2; exit 1; }; kubectl delete --filename "$1" ;;
+              *)      echo "manifest subcommands: list | apply <file> | delete <file>" >&2; exit 1 ;;
+            esac
+          '';
+        };
+    };
   };
 
 in
