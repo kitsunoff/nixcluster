@@ -1,3 +1,9 @@
 # Private keys - NEVER commit
 secrets/*.age.key
 secrets/*_ssh
+
+# Local dev-stand test flakes (absolute paths / stand-specific IPs)
+tests/
+
+# Local working session notes (verification results, not for publishing)
+notes/
