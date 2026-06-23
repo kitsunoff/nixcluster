@@ -63,8 +63,8 @@ let
       users.users.root.initialHashedPassword = "";
 
       # Auto-start installation
-      systemd.services.nix8s-installer = {
-        description = "nix8s Auto-Installer";
+      systemd.services.nixcluster-installer = {
+        description = "nixcluster Auto-Installer";
         wantedBy = [ "multi-user.target" ];
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
@@ -90,7 +90,7 @@ let
 
           echo ""
           echo "=========================================="
-          echo " nix8s Auto-Installer"
+          echo " nixcluster Auto-Installer"
           echo " Target: ${clusterName}-${memberName}"
           echo " Disk: ${targetDisk}"
           echo "=========================================="
@@ -171,7 +171,7 @@ let
       systemd.services.set-hostname-from-mac = {
         description = "Set hostname based on MAC address";
         wantedBy = [ "multi-user.target" ];
-        before = [ "network-online.target" "nix8s-discovery.service" ];
+        before = [ "network-online.target" "nixcluster-discovery.service" ];
         after = [ "systemd-udevd.service" ];
         path = with pkgs; [ iproute2 gnugrep coreutils gawk hostname ];
 
@@ -193,8 +193,8 @@ let
       };
 
       # Hardware discovery service
-      systemd.services.nix8s-discovery = {
-        description = "nix8s Hardware Discovery";
+      systemd.services.nixcluster-discovery = {
+        description = "nixcluster Hardware Discovery";
         wantedBy = [ "multi-user.target" ];
         after = [ "network-online.target" "set-hostname-from-mac.service" ];
         wants = [ "network-online.target" ];
@@ -212,7 +212,7 @@ let
 
           echo ""
           echo "=========================================="
-          echo " nix8s Hardware Discovery"
+          echo " nixcluster Hardware Discovery"
           echo " Cluster: ${clusterName}"
           echo "=========================================="
           echo ""
@@ -376,7 +376,7 @@ in
               goto menu
 
               :menu
-              menu nix8s PXE Boot - ${clusterName}
+              menu nixcluster PXE Boot - ${clusterName}
               item discovery   [Discovery] Scan hardware (unknown nodes)
               item --gap --
               ${lib.concatMapStringsSep "\n" (name:
@@ -419,7 +419,7 @@ in
 
           in
           pkgs.writeShellApplication {
-            name = "nix8sctl-${clusterName}-pxe-server";
+            name = "nixclusterctl-${clusterName}-pxe-server";
             runtimeInputs = with pkgs; [ dnsmasq python3 coreutils jq ];
             text = ''
               set -euo pipefail

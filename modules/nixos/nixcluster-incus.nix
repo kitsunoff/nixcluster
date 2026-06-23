@@ -1,5 +1,5 @@
 # NixOS module for Incus configuration
-# Receives cluster context via nix8s module args.
+# Receives cluster context via nixcluster module args.
 #
 # Enables the Incus daemon and performs a declarative, idempotent
 # initialization (network bridge + storage pool + default profile) via the

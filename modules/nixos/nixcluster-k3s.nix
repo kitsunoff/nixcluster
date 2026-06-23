@@ -1,11 +1,11 @@
 # NixOS module for k3s configuration
-# Receives cluster context via nix8s module args
-{ config, lib, pkgs, nix8s, ... }:
+# Receives cluster context via nixcluster module args
+{ config, lib, pkgs, nixcluster, ... }:
 
 let
   cfg = config.k3s;
-  cluster = nix8s.cluster;
-  memberName = nix8s.memberName;
+  cluster = nixcluster.cluster;
+  memberName = nixcluster.memberName;
 
   # Get all servers from cluster members
   allMembers = cluster.members;

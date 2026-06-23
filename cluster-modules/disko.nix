@@ -92,9 +92,9 @@ let
   };
 
   # NixOS module that configures disko
-  diskoNixosModule = { config, lib, pkgs, nix8s, ... }:
+  diskoNixosModule = { config, lib, pkgs, nixcluster, ... }:
     let
-      member = nix8s.member;
+      member = nixcluster.member;
 
       # Get disk from install config (cluster member option)
       installDisk = member.install.disk or null;

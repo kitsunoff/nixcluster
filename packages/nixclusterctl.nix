@@ -1,21 +1,21 @@
-# nix8sctl - Cluster management CLI
+# nixclusterctl - Cluster management CLI
 #
 # Simple router that discovers clusters via nix eval
 # and routes to cluster subcommands via nix run
 { pkgs }:
 
 pkgs.writeShellApplication {
-  name = "nix8sctl";
+  name = "nixclusterctl";
   runtimeInputs = with pkgs; [ nix jq ];
   text = ''
     show_help() {
       CLUSTERS=$(nix eval .#clusterConfigurations --apply 'builtins.attrNames' --json 2>/dev/null | jq -r '.[]' || echo "")
       cat << EOF
-    nix8sctl - Cluster management CLI
+    nixclusterctl - Cluster management CLI
 
     Usage:
-      nix8sctl cluster <command>     System commands
-      nix8sctl <cluster> <command>   Cluster commands
+      nixclusterctl cluster <command>     System commands
+      nixclusterctl <cluster> <command>   Cluster commands
 
     Clusters:
     EOF
@@ -27,7 +27,7 @@ pkgs.writeShellApplication {
         echo "    (none found)"
       fi
       echo ""
-      echo "Use 'nix8sctl <cluster> --help' for cluster commands."
+      echo "Use 'nixclusterctl <cluster> --help' for cluster commands."
     }
 
     CMD="''${1:-}"

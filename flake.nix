@@ -1,5 +1,5 @@
 {
-  description = "nix8s - Declarative NixOS cluster management";
+  description = "nixcluster - Declarative NixOS cluster management";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -14,8 +14,8 @@
     let
       lib = nixpkgs.lib;
 
-      # nix8s library
-      nix8sLib = import ./lib { inherit lib inputs; };
+      # nixcluster library
+      nixclusterLib = import ./lib { inherit lib inputs; };
 
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
 
@@ -27,7 +27,7 @@
     in
     {
       # Export library functions
-      lib = nix8sLib;
+      lib = nixclusterLib;
 
       # Export cluster modules
       clusterModules = {
@@ -42,7 +42,7 @@
 
       # Packages
       packages = forAllSystems ({ pkgs, ... }: {
-        nix8sctl = import ./packages/nix8sctl.nix { inherit pkgs; };
+        nixclusterctl = import ./packages/nixclusterctl.nix { inherit pkgs; };
       });
 
       # Apps - cluster CLIs
@@ -59,7 +59,7 @@
       devShells = forAllSystems ({ pkgs, ... }: {
         default = pkgs.mkShell {
           packages = [
-            (import ./packages/nix8sctl.nix { inherit pkgs; })
+            (import ./packages/nixclusterctl.nix { inherit pkgs; })
           ];
         };
       });
@@ -81,7 +81,7 @@
 
       # Test cluster
       clusterConfigurations = {
-        dev = nix8sLib.mkCluster {
+        dev = nixclusterLib.mkCluster {
           imports = [
             self.clusterModules.disko
             self.clusterModules.k3s
@@ -147,11 +147,11 @@
       };
 
       # === Example usage (standalone) ===
-      # To use nix8s in your flake:
+      # To use nixcluster in your flake:
       #
       # clusterConfigurations = {
-      #   prod = nix8sLib.mkCluster {
-      #     imports = [ nix8s.clusterModules.k3s ];
+      #   prod = nixclusterLib.mkCluster {
+      #     imports = [ nixcluster.clusterModules.k3s ];
       #     name = "prod";
       #
       #     members.node1 = {
@@ -164,6 +164,6 @@
       #   };
       # };
       #
-      # inherit (nix8sLib.mkFlakeOutputs { inherit self; }) nixosConfigurations apps;
+      # inherit (nixclusterLib.mkFlakeOutputs { inherit self; }) nixosConfigurations apps;
     };
 }
