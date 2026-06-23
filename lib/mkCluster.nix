@@ -25,6 +25,8 @@ let
     modules = [
       coreModule
       clusterConfig
+      # Thread flake inputs into the cluster config (consumed by e.g. pxe).
+      { _inputs = inputs; }
     ];
   };
 

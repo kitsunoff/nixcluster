@@ -34,9 +34,19 @@ let
   mkInstallerConfig = memberName: member: { pkgs, inputs, ... }:
     let
       # Target config is the member's nixosConfiguration with cluster patches
-      # This will be built and installed by the installer
+      # This will be built and installed by the installer. The generated modules
+      # (k3s/disko/...) consume the `nixcluster` module arg, so thread the same
+      # cluster context that mkCluster provides.
       targetConfig = member.nixosConfiguration.extendModules {
-        modules = config._generatedNixosModules.${memberName} or [];
+        modules = (config._generatedNixosModules.${memberName} or []) ++ [
+          {
+            _module.args.nixcluster = {
+              cluster = config;
+              clusterName = config.name;
+              inherit memberName member;
+            };
+          }
+        ];
       };
 
       targetDisk = member.install.disk or "/dev/sda";
@@ -342,8 +352,10 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    commands = [{
-      pxe-server = {
+    commandGroups.pxe = {
+      description = "PXE boot / auto-provisioning";
+      actions = {
+      server = {
         description = "Start PXE boot server with auto-provisioning";
         builder = { pkgs, cluster, ... }:
           let
@@ -369,7 +381,7 @@ in
                   member = config.members.${name};
                   mac = lib.toLower (member.install.mac);
                 in
-                "iseq \''${net0/mac} ${mac} && goto install-${name} ||"
+                "iseq \${net0/mac} ${mac} && goto install-${name} ||"
               ) (lib.attrNames membersWithMac)}
 
               # No MAC match - show menu
@@ -575,6 +587,7 @@ in
             '';
           };
       };
-    }];
+      };
+    };
   };
 }

@@ -31,7 +31,7 @@ let
 
   # CLI commands
   incusCommands = {
-    incus-status = {
+    status = {
       description = "Show Incus status on cluster nodes";
       builder = { pkgs, cluster, ... }:
         pkgs.writeShellApplication {
@@ -57,7 +57,7 @@ let
         };
     };
 
-    incus-init = {
+    init = {
       description = "Re-apply Incus preseed (idempotent) on cluster nodes";
       builder = { pkgs, cluster, ... }:
         pkgs.writeShellApplication {
@@ -97,7 +97,10 @@ in
       [ incusNixosModule ]
     );
 
-    # Expose CLI commands only when at least one node activates Incus.
-    commands = lib.mkIf (incusMemberNames != []) [ incusCommands ];
+    # Expose CLI commands only when at least one node activates Incus (group `incus`).
+    commandGroups.incus = lib.mkIf (incusMemberNames != []) {
+      description = "Incus virtualization management";
+      actions = incusCommands;
+    };
   };
 }
