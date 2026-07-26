@@ -5,6 +5,7 @@ rec {
   mkCluster = import ./mkCluster.nix { inherit lib inputs; };
   mkClusterCli = import ./mkClusterCli.nix { inherit lib; };
   mkClusterOutputs = import ./clusterOutputs.nix { inherit lib; };
+  mkNixclusterctl = import ./mkNixclusterctl.nix { inherit lib; };
   mkFlakeOutputs = import ./mkFlakeOutputs.nix { inherit lib inputs; };
 
   # Core cluster module path.

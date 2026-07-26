@@ -47,7 +47,10 @@
 
       # Packages
       packages = forAllSystems ({ pkgs, ... }: {
-        nixclusterctl = import ./packages/nixclusterctl.nix { inherit pkgs; };
+        nixclusterctl = nixclusterLib.mkNixclusterctl {
+          inherit pkgs;
+          clusterConfigurations = self.clusterConfigurations;
+        };
       });
 
       # Apps - cluster CLIs
@@ -61,10 +64,10 @@
       );
 
       # DevShell
-      devShells = forAllSystems ({ pkgs, ... }: {
+      devShells = forAllSystems ({ pkgs, system }: {
         default = pkgs.mkShell {
           packages = [
-            (import ./packages/nixclusterctl.nix { inherit pkgs; })
+            self.packages.${system}.nixclusterctl
           ];
         };
       });
