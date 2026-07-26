@@ -5,6 +5,7 @@
 
 let
   mkClusterCli = import ./mkClusterCli.nix { inherit lib; };
+  resolveMemberBase = import ./resolveMemberBase.nix { inherit lib; };
 
   # Keys that are nixcluster-specific, not NixOS patches.
   nixclusterKeys = [ "nixosConfiguration" "install" ];
@@ -30,8 +31,11 @@ let
           inherit memberName member;
         };
       };
+
+      # Effective base config: member's own, else cluster default (throws if none).
+      baseNixosConfiguration = resolveMemberBase cfg memberName member;
     in
-    member.nixosConfiguration.extendModules {
+    baseNixosConfiguration.extendModules {
       modules = [
         nixosPatches
         clusterContext
