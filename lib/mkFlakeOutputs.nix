@@ -1,11 +1,16 @@
 # mkFlakeOutputs - Generate flake outputs from clusterConfigurations
 #
 # Usage (standalone):
-#   inherit (nixcluster.lib.mkFlakeOutputs { inherit self; }) nixosConfigurations apps;
+#   inherit (nixcluster.lib.mkFlakeOutputs { inherit self; })
+#     nixosConfigurations apps packages;
 #
 # Usage (with explicit clusterConfigurations):
 #   outputs = nixcluster.lib.mkFlakeOutputs { clusterConfigurations = ...; nixpkgs = ...; };
-{ lib, inputs }:
+#
+# Per-system apps + packages come from the shared mkPerSystemOutputs helper, so
+# this standalone path produces the SAME cluster-<name> apps/packages and
+# nixclusterctl as the flake-parts module and the root flake.
+{ lib, inputs, mkPerSystemOutputs }:
 
 { self ? null, clusterConfigurations ? null, nixpkgs ? inputs.nixpkgs }:
 
@@ -24,66 +29,17 @@ let
   # Supported systems
   systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
 
-  # Build nixclusterctl for a system
-  mkNixclusterctl = system:
-    let
+  # Per-system projection (apps + packages), one call per system.
+  perSystem = lib.genAttrs systems (system:
+    mkPerSystemOutputs {
       pkgs = nixpkgs.legacyPackages.${system};
+      clusterConfigurations = clusters;
+    });
 
-      # Get CLI subcommand from each cluster
-      clusterClis = lib.mapAttrs (name: cluster: cluster.cli pkgs) clusters;
-
-      # Main router
-      clusterCases = lib.concatStringsSep "\n" (lib.mapAttrsToList (name: cli: ''
-        ${name})
-          shift
-          exec ${lib.getExe cli} "$@"
-          ;;
-      '') clusterClis);
-
-      clusterList = lib.concatStringsSep "\n" (lib.mapAttrsToList (name: cluster:
-        let
-          memberCount = toString (lib.length (lib.attrNames cluster.config.members));
-          hasK3s = (lib.filterAttrs (n: m: m.k3s.role or null != null) cluster.config.members) != {};
-          features = lib.optionalString hasK3s " (k3s)";
-        in
-        "  ${name} - ${memberCount} members${features}"
-      ) clusters);
-
-      nixclusterctl = pkgs.writeShellApplication {
-        name = "nixclusterctl";
-        text = ''
-          show_help() {
-            cat << 'EOF'
-          nixclusterctl - Cluster management CLI
-
-          Usage: nixclusterctl <cluster> <command> [args...]
-
-          Clusters:
-          ${clusterList}
-
-          Use 'nixclusterctl <cluster> --help' for commands.
-          EOF
-          }
-
-          CLUSTER="''${1:-}"
-          case "$CLUSTER" in
-          ${clusterCases}
-            help|--help|-h|"") show_help ;;
-            *) echo "Unknown cluster: $CLUSTER"; show_help; exit 1 ;;
-          esac
-        '';
-      };
-    in
-    {
-      type = "app";
-      program = lib.getExe nixclusterctl;
-    };
-
-  apps = lib.genAttrs systems (system: {
-    nixclusterctl = mkNixclusterctl system;
-  });
+  apps = lib.mapAttrs (_system: o: o.apps) perSystem;
+  packages = lib.mapAttrs (_system: o: o.packages) perSystem;
 
 in
 {
-  inherit nixosConfigurations apps;
+  inherit nixosConfigurations apps packages;
 }
