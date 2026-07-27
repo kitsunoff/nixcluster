@@ -65,9 +65,6 @@ let
     config.members);
 
   sshPrelude = ''
-    KNOWN_HOSTS=".nixcluster/known_hosts/${clusterName}"
-    mkdir -p "$(dirname "$KNOWN_HOSTS")"
-    touch "$KNOWN_HOSTS"
     node_ip() {
       case "$1" in
         ${nodeIpCases}
@@ -78,7 +75,10 @@ let
       local node="$1"; shift
       local ip; ip="$(node_ip "$node")"
       if [ -z "$ip" ]; then echo "no install.ip for node '$node'" >&2; return 1; fi
-      ssh -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
+      # No host-key pinning, consistent with the incus/nebula converge preludes
+      # (converge reinstalls nodes → host key changes). Identity comes from the
+      # cluster key installed by the converge preamble.
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=5 "root@$ip" "$@"
     }
   '';

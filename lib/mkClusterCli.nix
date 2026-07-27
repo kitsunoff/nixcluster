@@ -293,10 +293,6 @@ let
                 <<<"$STEPS_JSON")
             }
 
-            # --- known_hosts pin (B3), shared with install --------------------
-            KH_DIR="./.nixcluster/known_hosts"
-            KH_FILE="$KH_DIR/${clusterName}"
-            mkdir -p "$KH_DIR"; touch "$KH_FILE"
             # No host-key pinning on the converge path: converge reinstalls
             # members (nixos-anywhere), which CHANGES their ssh host key mid-run,
             # so accept-new (which rejects a *changed* key) would fail every
@@ -381,9 +377,9 @@ let
                 INSTALLED)
                   log "=== switch $member ($ip) [nixos-rebuild] ==="
                   # nixos-rebuild reads its ssh options ONLY from NIX_SSHOPTS, not
-                  # from our SSH_OPTS array, so pass the same known_hosts pin there
-                  # or the switch fails host-key verification in a non-interactive
-                  # (NIO / automation) re-converge.
+                  # from our SSH_OPTS array — pass the same (no-host-key-check)
+                  # options there so the switch works non-interactively (the node
+                  # was just reinstalled, so its host key changed).
                   if NIX_SSHOPTS="''${SSH_OPTS[*]}" nixos-rebuild switch --flake ".#${clusterName}-$member" --target-host "root@$ip"; then
                     end=$(date +%s); add_member "$member" "$ip" switch Applied "" $((end - start))
                   else
@@ -394,7 +390,6 @@ let
                   log "=== install $member ($ip) [nixos-anywhere] ==="
                   if nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}"; then
                     end=$(date +%s); add_member "$member" "$ip" install Applied "" $((end - start))
-                    ssh-keyscan -H "$ip" >> "$KH_FILE" 2>/dev/null || true
                   else
                     end=$(date +%s); add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
                   fi
