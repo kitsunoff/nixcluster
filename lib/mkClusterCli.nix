@@ -355,7 +355,11 @@ let
               case "$probe" in
                 INSTALLED)
                   log "=== switch $member ($ip) [nixos-rebuild] ==="
-                  if nixos-rebuild switch --flake ".#${clusterName}-$member" --target-host "root@$ip"; then
+                  # nixos-rebuild reads its ssh options ONLY from NIX_SSHOPTS, not
+                  # from our SSH_OPTS array, so pass the same known_hosts pin there
+                  # or the switch fails host-key verification in a non-interactive
+                  # (NIO / automation) re-converge.
+                  if NIX_SSHOPTS="''${SSH_OPTS[*]}" nixos-rebuild switch --flake ".#${clusterName}-$member" --target-host "root@$ip"; then
                     end=$(date +%s); add_member "$member" "$ip" switch Applied "" $((end - start))
                   else
                     end=$(date +%s); add_member "$member" "$ip" switch Failed "nixos-rebuild switch failed" $((end - start))
@@ -410,6 +414,14 @@ let
               printf '%s\n' "$FINAL"
             else
               printf '::nixcluster:result:: %s\n' "$FINAL"
+            fi
+
+            # Reflect a hard convergence failure in the exit code so a consumer
+            # driving converge as a Job (NIO's converge NixCronJob) sees the run
+            # fail instead of silently succeeding. "partial" (only Skipped, e.g.
+            # dry-run or an absent optional step) is NOT a failure.
+            if [[ "$RESULT" == "failed" ]]; then
+              exit 1
             fi
           '';
         };
