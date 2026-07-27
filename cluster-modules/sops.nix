@@ -76,6 +76,14 @@ in
       (name: member: [ (mkSopsNixosModule name member) ])
       config.members;
 
+    # converge preStep: materialize secrets before any member is installed.
+    # Reuses the exact `sops gen` action builder (no duplicated logic).
+    converge.preSteps."sops.gen" = {
+      description = "Generate/merge cluster secrets from providers";
+      priority = 10;
+      run = config.commandGroups.sops.actions.gen.builder;
+    };
+
     # CLI commands for sops management (group `sops`)
     commandGroups.sops = {
       description = "Secret management (sops)";

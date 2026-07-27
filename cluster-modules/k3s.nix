@@ -153,6 +153,21 @@ in
         description = "k3s cluster management";
         actions = k3sCommands;
       };
+
+      # converge postSteps: after members switch (k3s comes up via NixOS), report
+      # deploy state and fetch the kubeconfig. Reuses the k3s action builders.
+      converge.postSteps = lib.mkIf (allK3sMembers != []) {
+        "k3s.bootstrap" = {
+          description = "Report k3s bootstrap/deploy order";
+          priority = 30;
+          run = k3sCommands.bootstrap.builder;
+        };
+        "k3s.kubeconfig" = {
+          description = "Fetch cluster kubeconfig";
+          priority = 35;
+          run = k3sCommands.kubeconfig.builder;
+        };
+      };
     }
 
     # Register the k3s secret provider when sops is in use (task 10). Guarded by

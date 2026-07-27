@@ -251,5 +251,18 @@ in
       description = "Incus virtualization management";
       actions = incusCommands;
     };
+
+    # converge postStep: re-apply the Incus preseed + instance reconcile on every
+    # incus node after they switch. Reuses the EXISTING `incus init` action (it
+    # restarts incus-preseed.service + incus-instances-reconcile.service). The
+    # cluster-join flow (dynamic join tokens) is a SEPARATE task (design §5),
+    # NOT added here.
+    converge.postSteps = lib.mkIf (incusMemberNames != []) {
+      "incus.reconcile" = {
+        description = "Re-apply Incus preseed + instance reconcile on nodes";
+        priority = 70;
+        run = incusCommands.init.builder;
+      };
+    };
   };
 }
