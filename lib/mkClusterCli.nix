@@ -297,7 +297,12 @@ let
             KH_DIR="./.nixcluster/known_hosts"
             KH_FILE="$KH_DIR/${clusterName}"
             mkdir -p "$KH_DIR"; touch "$KH_FILE"
-            SSH_OPTS=(-o UserKnownHostsFile="$KH_FILE" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+            # No host-key pinning on the converge path: converge reinstalls
+            # members (nixos-anywhere), which CHANGES their ssh host key mid-run,
+            # so accept-new (which rejects a *changed* key) would fail every
+            # post-install step. Matches the operator-injected NIX_SSHOPTS, which
+            # also disables host-key checking for exactly this reason.
+            SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
 
             # The operator passes the cluster SSH key via NIX_SSHOPTS ("-i <path>
             # ..."), but plain ssh (the member probe below) and the module steps
