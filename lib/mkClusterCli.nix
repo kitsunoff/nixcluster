@@ -14,6 +14,8 @@
 { pkgs, cluster }:
 
 let
+  convergePlan = import ./convergePlan.nix { inherit lib; };
+
   clusterName = cluster.name;
   memberNames = lib.attrNames cluster.members;
 
@@ -206,47 +208,38 @@ let
           '';
         };
     };
-    # converge (task E): orchestrate a whole cluster in one shot — run
-    # cluster-level preSteps, install/switch every member (bootstrap first,
-    # install-once vs switch decided by an SSH probe), run postSteps, then emit
-    # a single machine-readable result line. Reuses the install/apply member->IP
-    # `case`, the `.#<cluster>-<member>` flake attr, and the known_hosts pin;
-    # step logic is reused from the modules (never reimplemented here).
+    # converge (task E): orchestrate a whole cluster in one shot. Every unit of
+    # work — a module step or a member's install/switch — is a node in
+    # `converge.steps`; convergePlan resolves them into a topological order and
+    # this command walks it, skipping any step whose dependency did not succeed,
+    # then emits a single machine-readable result line. Reuses the install/apply
+    # member->IP `case` and the `.#<cluster>-<member>` flake attr; step logic is
+    # reused from the modules (never reimplemented here).
     converge = {
-      description = "Converge the whole cluster (preSteps -> per-member install/switch -> postSteps)";
+      description = "Converge the whole cluster (dependency-ordered converge steps)";
       builder = { pkgs, lib, cluster, helpers, ... }:
         let
-          # Deterministic member order: bootstrapMember (if set) leads, the rest
-          # follow the explicit `order` (if set) or sorted-by-name.
-          sortedMembers = lib.sort (a: b: a < b) memberNames;
-          explicitOrder = cluster.converge.order or [];
-          bootstrapMember = cluster.converge.bootstrapMember or null;
-          baseOrder = if explicitOrder != [] then explicitOrder else sortedMembers;
-          convergeOrder =
-            if bootstrapMember != null
-            then [ bootstrapMember ] ++ (lib.filter (m: m != bootstrapMember) baseOrder)
-            else baseOrder;
+          stepOrder = convergePlan cluster;
+          stepOf = name: cluster.converge.steps.${name};
 
-          # Steps ordered by priority then name (deterministic; §4, minimal).
-          sortSteps = steps:
-            lib.sort
-              (a: b: if a.priority != b.priority then a.priority < b.priority else a.name < b.name)
-              (lib.mapAttrsToList (name: s: s // { inherit name; }) steps);
+          # One shell invocation per step, in dependency order. A member step
+          # dispatches to the built-in install/switch; every other step runs the
+          # package its module contributed.
+          mkStepDispatch = name:
+            let
+              step = stepOf name;
+              deps = lib.concatStringsSep " " (map lib.escapeShellArg step.deps);
+            in
+            if step.member != null
+            then ''run_member_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.member} ${deps}''
+            else ''run_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} ${lib.escapeShellArg (lib.getExe (step.run { inherit pkgs lib cluster helpers; }))} ${deps}'';
 
-          preStepsSorted = sortSteps (cluster.converge.preSteps or {});
-          postStepsSorted = sortSteps (cluster.converge.postSteps or {});
-
-          # Build each step's package once and emit a `run_step` invocation.
-          mkStepRuns = phase: steps: lib.concatMapStringsSep "\n" (s:
-            ''run_step ${lib.escapeShellArg s.name} ${lib.escapeShellArg phase} ${lib.escapeShellArg (lib.getExe (s.run { inherit pkgs lib cluster helpers; }))}''
-          ) steps;
+          stepDispatches = lib.concatMapStringsSep "\n            " mkStepDispatch stepOrder;
 
           # member -> default install.ip, reusing the install/apply case shape.
           memberIpCases = lib.concatStringsSep "\n              " (lib.mapAttrsToList
             (name: member: ''${name}) echo "${member.install.ip or ""}" ;;'')
             cluster.members);
-
-          orderArray = lib.concatStringsSep " " (map lib.escapeShellArg convergeOrder);
         in
         pkgs.writeShellApplication {
           name = "nixclusterctl-${clusterName}-converge";
@@ -278,6 +271,22 @@ let
             # --- accumulators (built with jq; never hand-concatenated) ---------
             MEMBERS_JSON='[]'
             STEPS_JSON='[]'
+
+            # Outcome of every step by name ("ok" | "failed" | "skipped"), so a
+            # step whose dependency did not succeed is skipped instead of run.
+            declare -A STEP_STATUS=()
+
+            # Echoes the first dependency that did not succeed, if any.
+            failed_dep() {
+              local dep
+              for dep in "$@"; do
+                if [[ "''${STEP_STATUS[$dep]:-missing}" != "ok" ]]; then
+                  echo "$dep"
+                  return 0
+                fi
+              done
+              return 1
+            }
 
             add_member() { # name ip action status message durationSeconds
               MEMBERS_JSON=$(jq -c \
@@ -341,33 +350,67 @@ let
               EF_ARGS+=(--extra-files "$EXTRA_FILES")
             fi
 
-            run_step() { # name phase exe
+            run_step() { # name phase exe [deps...]
               local name="$1" phase="$2" exe="$3"
+              shift 3
+              local blocker
+              if blocker=$(failed_dep "$@"); then
+                log "  [step:$phase] $name skipped (dependency '$blocker' did not succeed)"
+                add_step "$name" "$phase" skipped "dependency '$blocker' did not succeed"
+                STEP_STATUS[$name]=skipped
+                return 0
+              fi
               if [[ "$DRY_RUN" -eq 1 ]]; then
                 log "  [step:$phase] $name (dry-run, not executed)"
                 add_step "$name" "$phase" skipped "dry-run"
+                STEP_STATUS[$name]=skipped
                 return 0
               fi
               log "=== step [$phase] $name ==="
               if "$exe"; then
                 add_step "$name" "$phase" ok ""
+                STEP_STATUS[$name]=ok
               else
                 add_step "$name" "$phase" failed "step exited non-zero"
+                STEP_STATUS[$name]=failed
               fi
             }
 
+            # A member step: skip when a dependency failed, otherwise install or
+            # switch the member and record the outcome under the STEP name so
+            # dependents can gate on it.
+            run_member_step() { # step-name member [deps...]
+              local name="$1" member="$2"
+              shift 2
+              local blocker
+              if blocker=$(failed_dep "$@"); then
+                log "  [member] $member skipped (dependency '$blocker' did not succeed)"
+                add_member "$member" "$(member_ip "$member")" noop Skipped \
+                  "dependency '$blocker' did not succeed" 0
+                STEP_STATUS[$name]=skipped
+                return 0
+              fi
+              if converge_member "$member"; then
+                STEP_STATUS[$name]=ok
+              else
+                STEP_STATUS[$name]=failed
+              fi
+            }
+
+            # Installs or switches one member. Returns non-zero only when the
+            # member genuinely failed to converge (a dry-run is not a failure).
             converge_member() { # member
               local member="$1" ip probe start end
               ip="$(member_ip "$member")"
               if [[ "$DRY_RUN" -eq 1 ]]; then
                 log "  [member] $member -> ''${ip:-<no-ip>} (dry-run, not probed)"
                 add_member "$member" "$ip" noop Skipped "dry-run" 0
-                return 0
+                return 1
               fi
               if [[ -z "$ip" ]]; then
                 log "  [member] $member has no install.ip; skipping"
                 add_member "$member" "" noop Failed "no install.ip for $member" 0
-                return 0
+                return 1
               fi
               start=$(date +%s)
               probe=$(ssh "''${SSH_OPTS[@]}" "root@$ip" \
@@ -401,25 +444,14 @@ let
             }
 
             log "Converging cluster '${clusterName}'"
-            log "Member order: ${lib.concatStringsSep " " convergeOrder}"
+            log "Step order: ${lib.concatStringsSep " " stepOrder}"
             log ""
 
-            # 1) preSteps
-            log "--- preSteps ---"
-            ${mkStepRuns "pre" preStepsSorted}
+            # 1) walk the converge DAG in dependency order. Each dispatch skips
+            #    itself when one of its dependencies did not succeed.
+            ${stepDispatches}
 
-            # 2) per-member install/switch loop
-            log "--- members ---"
-            ORDER=(${orderArray})
-            for m in "''${ORDER[@]}"; do
-              converge_member "$m"
-            done
-
-            # 3) postSteps
-            log "--- postSteps ---"
-            ${mkStepRuns "post" postStepsSorted}
-
-            # 4) result + emit
+            # 2) result + emit
             RESULT=$(jq -rn --argjson m "$MEMBERS_JSON" --argjson s "$STEPS_JSON" '
               if ($m | any(.status=="Failed")) or ($s | any(.status=="failed")) then "failed"
               elif ($m | any(.status=="Skipped")) or ($s | any(.status=="skipped")) then "partial"

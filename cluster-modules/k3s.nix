@@ -21,6 +21,10 @@ let
   # First server
   sortedServers = lib.sort (a: b: a < b) servers;
   firstServer = if sortedServers != [] then lib.head sortedServers else null;
+
+  # Converge-step names (must match core's `member-<name>` generation).
+  memberStepName = memberName: "member-${memberName}";
+  serverSteps = map memberStepName sortedServers;
   firstServerIp = if firstServer != null
     then config.members.${firstServer}.install.ip or null
     else null;
@@ -154,20 +158,43 @@ in
         actions = k3sCommands;
       };
 
-      # converge postSteps: after members switch (k3s comes up via NixOS), report
-      # deploy state and fetch the kubeconfig. Reuses the k3s action builders.
-      converge.postSteps = lib.mkIf (allK3sMembers != []) {
-        "k3s.bootstrap" = {
-          description = "Report k3s bootstrap/deploy order";
-          priority = 30;
-          run = k3sCommands.bootstrap.builder;
-        };
-        "k3s.kubeconfig" = {
-          description = "Fetch cluster kubeconfig";
-          priority = 35;
-          run = k3sCommands.kubeconfig.builder;
-        };
-      };
+      # converge DAG: the k3s ordering contract, expressed as dependencies.
+      #
+      #   - the first server bootstraps the cluster (etcd), so every other server
+      #     waits for it;
+      #   - an agent has nothing to join until the control plane exists, so it
+      #     waits for ALL servers — not merely for whichever member core happened
+      #     to order before it;
+      #   - the kubeconfig can only be fetched from a running server.
+      #
+      # Refining the generated `member-*` steps is enough; core supplies the rest
+      # of each step (the member it converges, its description).
+      converge.steps = lib.mkIf (allK3sMembers != []) (
+        {
+          "k3s.bootstrap" = {
+            description = "Report k3s bootstrap/deploy order";
+            phase = "post";
+            priority = 30;
+            deps = serverSteps;
+            run = k3sCommands.bootstrap.builder;
+          };
+          "k3s.kubeconfig" = {
+            description = "Fetch cluster kubeconfig";
+            phase = "post";
+            priority = 35;
+            deps = serverSteps;
+            run = k3sCommands.kubeconfig.builder;
+          };
+        }
+        // lib.listToAttrs (map
+          (server: lib.nameValuePair (memberStepName server) {
+            deps = [ (memberStepName firstServer) ];
+          })
+          (lib.filter (server: server != firstServer) servers))
+        // lib.listToAttrs (map
+          (agent: lib.nameValuePair (memberStepName agent) { deps = serverSteps; })
+          agents)
+      );
     }
 
     # Register the k3s secret provider when sops is in use (task 10). Guarded by
