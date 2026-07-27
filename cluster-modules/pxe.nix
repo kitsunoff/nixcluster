@@ -19,6 +19,9 @@ let
   cfg = config.pxe;
   clusterName = config.name;
 
+  # Resolve a member's effective base config (own, else cluster default).
+  resolveMemberBase = import ../lib/resolveMemberBase.nix { inherit lib; };
+
   # iPXE assets path
   ipxeAssetsPath = ../assets/ipxe;
 
@@ -37,7 +40,7 @@ let
       # This will be built and installed by the installer. The generated modules
       # (k3s/disko/...) consume the `nixcluster` module arg, so thread the same
       # cluster context that mkCluster provides.
-      targetConfig = member.nixosConfiguration.extendModules {
+      targetConfig = (resolveMemberBase config memberName member).extendModules {
         modules = (config._generatedNixosModules.${memberName} or []) ++ [
           {
             _module.args.nixcluster = {
