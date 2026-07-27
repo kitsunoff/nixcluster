@@ -22,12 +22,32 @@ let
   # NixOS module that configures the Incus daemon + idempotent preseed.
   incusNixosModule = ../modules/nixos/nixcluster-incus.nix;
 
-  # Members that have Incus activated (via NixOS option incus.enable as a patch).
-  incusMembers = lib.filterAttrs
+  # Multi-node clustering toggle (cluster-level, NOT per-member).
+  clusterEnabled = cfg.cluster.enable;
+
+  # Members that have Incus activated. In clustering mode EVERY cluster member
+  # participates (followup C: NIO-injected data-only members never set the
+  # per-member NixOS patch `member.incus.enable`, so clustering must NOT depend
+  # on it). Otherwise only members that opt in via that patch.
+  perMemberIncusMembers = lib.filterAttrs
     (name: member: member.incus.enable or false)
     config.members;
+  incusMembers = if clusterEnabled then config.members else perMemberIncusMembers;
 
   incusMemberNames = lib.attrNames incusMembers;
+
+  # Bootstrap resolution: explicit `incus.cluster.bootstrapMember`, else the
+  # first member sorted by name (all members run Incus when clustering).
+  sortedMemberNames = lib.sort (a: b: a < b) (lib.attrNames config.members);
+  resolvedBootstrap =
+    if cfg.cluster.bootstrapMember != null then cfg.cluster.bootstrapMember
+    else if sortedMemberNames != [] then lib.head sortedMemberNames
+    else null;
+  bootstrapIp =
+    if resolvedBootstrap != null
+    then (config.members.${resolvedBootstrap}.install.ip or null)
+    else null;
+  joinerNames = lib.filter (n: n != resolvedBootstrap) (lib.attrNames config.members);
 
   # Shell prelude: resolve a member -> install.ip and ssh with a PINNED
   # known_hosts (B3 runtime phase — no StrictHostKeyChecking=no). The host key
@@ -104,6 +124,94 @@ let
                 'systemctl restart incus-preseed.service 2>/dev/null && echo "  preseed re-applied" || echo "  no incus-preseed.service"; systemctl restart incus-instances-reconcile.service 2>/dev/null && echo "  instances reconciled" || echo "  no reconcile unit"' \
                 || echo "  (unreachable)"
             done
+          '';
+        };
+    };
+
+    cluster-join = {
+      description = "Join Incus cluster members to the bootstrap node (idempotent)";
+      builder = { pkgs, cluster, ... }:
+        let
+          joinerArray = lib.concatStringsSep " " (map lib.escapeShellArg joinerNames);
+        in
+        pkgs.writeShellApplication {
+          name = "nixclusterctl-${clusterName}-incus-cluster-join";
+          runtimeInputs = with pkgs; [ openssh coreutils jq gnugrep ];
+          text = ''
+            set -uo pipefail
+            ${sshPrelude}
+
+            BOOTSTRAP="${toString resolvedBootstrap}"
+            BOOTSTRAP_IP="${toString bootstrapIp}"
+            PORT="${toString cfg.cluster.httpsPort}"
+            JOINERS=(${joinerArray})
+
+            if [ -z "$BOOTSTRAP" ]; then
+              echo "incus cluster-join: no bootstrap member resolved" >&2
+              exit 1
+            fi
+            if [ -z "$BOOTSTRAP_IP" ]; then
+              echo "incus cluster-join: no install.ip for bootstrap '$BOOTSTRAP'" >&2
+              exit 1
+            fi
+
+            echo "=== Incus cluster-join (bootstrap: $BOOTSTRAP @ $BOOTSTRAP_IP:$PORT) ==="
+
+            # Current membership: first CSV column is the member name. Tolerate a
+            # not-yet-clustered / unreachable bootstrap (treated as no members).
+            existing="$(ssh_node "$BOOTSTRAP" 'incus cluster list --format csv 2>/dev/null' \
+              | cut -d, -f1 || true)"
+
+            rc=0
+            for joiner in "''${JOINERS[@]}"; do
+              jip="$(node_ip "$joiner")"
+              if [ -z "$jip" ]; then
+                echo "  $joiner: no install.ip, skipping" >&2
+                rc=1
+                continue
+              fi
+              if printf '%s\n' "$existing" | grep -qxF "$joiner"; then
+                echo "  $joiner: already a cluster member, skipping"
+                continue
+              fi
+
+              echo "  $joiner: minting single-use join token on $BOOTSTRAP"
+              if ! token="$(ssh_node "$BOOTSTRAP" incus cluster add "$joiner" --quiet)"; then
+                echo "  $joiner: FAILED to mint join token" >&2
+                rc=1
+                continue
+              fi
+              token="$(printf '%s' "$token" | tr -d '\r\n')"
+              if [ -z "$token" ]; then
+                echo "  $joiner: empty join token" >&2
+                rc=1
+                continue
+              fi
+
+              # Build the join preseed as JSON (valid YAML) so the token and
+              # address are injected as data, never concatenated into hand-written
+              # YAML. member_config is empty: a dir storage pool + NAT bridge carry
+              # no per-member keys, and cluster-wide entities propagate from the
+              # bootstrap on join. (Backends needing a per-member source would add
+              # entries here — future work, validated on real VMs.)
+              preseed="$(jq -n \
+                --arg addr "$jip:$PORT" \
+                --arg token "$token" \
+                '{cluster:{enabled:true,server_address:$addr,cluster_token:$token,member_config:[]}}')"
+
+              echo "  $joiner: joining via incus admin init --preseed"
+              if printf '%s' "$preseed" | ssh_node "$joiner" 'incus admin init --preseed'; then
+                echo "  $joiner: joined"
+              else
+                echo "  $joiner: FAILED to join" >&2
+                rc=1
+              fi
+            done
+
+            if [ "$rc" -ne 0 ]; then
+              echo "incus cluster-join: one or more joiners failed" >&2
+            fi
+            exit "$rc"
           '';
         };
     };
@@ -227,6 +335,41 @@ in
   options.incus = {
     enable = lib.mkEnableOption "Incus virtualization support";
 
+    # Multi-node clustering (cluster-level, NOT per-member — followup C). When
+    # enabled, ALL cluster members participate (including data-only members).
+    cluster = {
+      enable = lib.mkEnableOption "multi-node Incus clustering across all members";
+
+      bootstrapMember = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Member that bootstraps the Incus cluster (initialized declaratively at
+          activation). All other members are joiners, joined at runtime by the
+          converge `incus.cluster-join` postStep. Null resolves to the first
+          member sorted by name.
+        '';
+      };
+
+      httpsPort = lib.mkOption {
+        type = lib.types.int;
+        default = 8443;
+        description = "Port for the Incus HTTPS API and cluster member addresses.";
+      };
+
+      storagePool = lib.mkOption {
+        type = lib.types.str;
+        default = "default";
+        description = "Name of the cluster-wide default Incus storage pool.";
+      };
+
+      storageBackend = lib.mkOption {
+        type = lib.types.enum [ "dir" "btrfs" "lvm" "zfs" ];
+        default = "dir";
+        description = "Storage driver for the cluster-wide default pool.";
+      };
+    };
+
     instances = lib.mkOption {
       type = lib.types.attrsOf (lib.types.attrsOf lib.types.anything);
       default = {};
@@ -242,8 +385,23 @@ in
     # Add the Incus NixOS module to ALL members; per-node activation is gated
     # by the NixOS option `incus.enable`. The full instance set is handed to
     # every node so each can reconcile the ones bound to it.
+    #
+    # In clustering mode, additionally activate Incus on EVERY member (data-only
+    # members included) and inject the clustering role so the NixOS module can
+    # pick bootstrap vs joiner. This drives membership off the cluster-level
+    # `incus.cluster.enable`, never the per-member patch (followup C).
     _generatedNixosModules = lib.genAttrs (lib.attrNames config.members) (_:
       [ incusNixosModule { incus.instances = cfg.instances; } ]
+      ++ lib.optional clusterEnabled {
+        incus.enable = true;
+        incus.storagePool = cfg.cluster.storagePool;
+        incus.storageBackend = cfg.cluster.storageBackend;
+        incus.cluster = {
+          enable = true;
+          bootstrapMember = resolvedBootstrap;
+          httpsPort = cfg.cluster.httpsPort;
+        };
+      }
     );
 
     # Expose CLI commands only when at least one node activates Incus (group `incus`).
@@ -252,17 +410,29 @@ in
       actions = incusCommands;
     };
 
-    # converge postStep: re-apply the Incus preseed + instance reconcile on every
-    # incus node after they switch. Reuses the EXISTING `incus init` action (it
-    # restarts incus-preseed.service + incus-instances-reconcile.service). The
-    # cluster-join flow (dynamic join tokens) is a SEPARATE task (design §5),
-    # NOT added here.
-    converge.postSteps = lib.mkIf (incusMemberNames != []) {
-      "incus.reconcile" = {
-        description = "Re-apply Incus preseed + instance reconcile on nodes";
-        priority = 70;
-        run = incusCommands.init.builder;
-      };
-    };
+    # converge postSteps:
+    #  - incus.cluster-join (only when clustering): mint single-use join tokens
+    #    on the bootstrap and join each joiner via `incus admin init --preseed`.
+    #    Runs BEFORE reconcile (priority 65 < 70) so a joiner is already a cluster
+    #    member when its declared instances reconcile; idempotent (skips members
+    #    already in `incus cluster list`).
+    #  - incus.reconcile (always, when there are incus nodes): re-apply the
+    #    preseed + instance reconcile. Reuses the EXISTING `incus init` action.
+    converge.postSteps = lib.mkMerge [
+      (lib.mkIf clusterEnabled {
+        "incus.cluster-join" = {
+          description = "Join Incus cluster members to the bootstrap node";
+          priority = 65;
+          run = incusCommands.cluster-join.builder;
+        };
+      })
+      (lib.mkIf (incusMemberNames != []) {
+        "incus.reconcile" = {
+          description = "Re-apply Incus preseed + instance reconcile on nodes";
+          priority = 70;
+          run = incusCommands.init.builder;
+        };
+      })
+    ];
   };
 }
