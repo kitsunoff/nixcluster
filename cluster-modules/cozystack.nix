@@ -287,6 +287,22 @@ in
       [ cozystackNixosModule ]
     );
 
+    # converge postSteps: after k3s is up (higher priority than k3s steps),
+    # bootstrap the platform then initialize LINSTOR storage. Reuses the exact
+    # cozystack action builders (no duplicated logic).
+    converge.postSteps = {
+      "cozystack.bootstrap" = {
+        description = "Bootstrap cozystack on the cluster";
+        priority = 50;
+        run = config.commandGroups.cozystack.actions.bootstrap.builder;
+      };
+      "cozystack.init-storage" = {
+        description = "Initialize LINSTOR storage pools on nodes";
+        priority = 60;
+        run = config.commandGroups.cozystack.actions.init-storage.builder;
+      };
+    };
+
     # CLI commands (group `cozystack`)
     commandGroups.cozystack = {
       description = "Cozystack platform management";

@@ -145,6 +145,11 @@ in
         description = "keepalived VRRP management";
         actions = keepalivedCommands;
       };
+
+      # No converge step: keepalived needs no runtime orchestration. Its VRRP
+      # auth password is delivered via the sops provider (below) and applied by
+      # sops.gen (a converge preStep), and its VIPs are brought up by the
+      # keepalived service at NixOS switch. Nothing to run between members.
     }
 
     # Register the keepalived secret provider (VRRP auth_pass per instance) when
