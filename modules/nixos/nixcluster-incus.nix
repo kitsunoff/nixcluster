@@ -20,6 +20,88 @@ let
   thisMember = if nixcluster != null then nixcluster.memberName else null;
   clusterName = if nixcluster != null then nixcluster.clusterName else "nixcluster";
 
+  # This member's deployment IP, injected by lib/clusterOutputs.nix as
+  # `_module.args.nixcluster.member`. Used for the Incus HTTPS listen address in
+  # clustering mode.
+  thisMemberIp =
+    if nixcluster != null then (nixcluster.member.install.ip or null) else null;
+
+  # Multi-node clustering role (see cluster-modules/incus.nix which populates
+  # `incus.cluster.*` per member). Exactly one member is the bootstrap; the rest
+  # are joiners that stay uninitialized at activation and are joined at runtime
+  # by the converge `incus.cluster-join` postStep.
+  clusterCfg = cfg.cluster;
+  isClustered = clusterCfg.enable;
+  isBootstrap = isClustered && clusterCfg.bootstrapMember == thisMember;
+  isJoiner = isClustered && !isBootstrap;
+  httpsAddress =
+    if thisMemberIp != null
+    then "${thisMemberIp}:${toString clusterCfg.httpsPort}"
+    else null;
+
+  # Networks/storage/profiles applied on a standalone node or the cluster
+  # bootstrap. Cluster-wide entities (defined once on the bootstrap) propagate
+  # to joiners automatically when they join, so joiners run NO preseed init.
+  basePreseed = {
+    networks = [{
+      name = cfg.bridgeName;
+      type = "bridge";
+      config = {
+        "ipv4.address" = cfg.bridgeAddress;
+        "ipv4.nat" = "true";
+        "ipv6.address" = "none";
+      };
+    }];
+
+    storage_pools = [({
+      name = cfg.storagePool;
+      driver = cfg.storageBackend;
+    } // lib.optionalAttrs (cfg.storageSource != null) {
+      config.source = cfg.storageSource;
+    })];
+
+    profiles = [{
+      name = "default";
+      devices = {
+        eth0 = {
+          name = "eth0";
+          network = cfg.bridgeName;
+          type = "nic";
+        };
+        root = {
+          path = "/";
+          pool = cfg.storagePool;
+          type = "disk";
+        };
+      };
+    }];
+  };
+
+  # Bootstrap preseed: the base entities PLUS the cluster enablement + HTTPS
+  # listen address. `incus admin init --preseed` on activation initializes this
+  # node as the first cluster member.
+  bootstrapPreseed = basePreseed // {
+    cluster = {
+      server_name = thisMember;
+      enabled = true;
+    };
+  } // lib.optionalAttrs (httpsAddress != null) {
+    config = { "core.https_address" = httpsAddress; };
+  };
+
+  # Effective preseed:
+  #   standalone         -> base (+ user extra), as before clustering existed;
+  #   cluster bootstrap  -> bootstrapPreseed (+ user extra);
+  #   cluster joiner     -> null: upstream `virtualisation.incus` only runs the
+  #     incus-preseed init service when `preseed != null`
+  #     (`systemd.services.incus-preseed = lib.mkIf (cfg.preseed != null)`), so a
+  #     null preseed leaves the daemon UNinitialized. This is required: a
+  #     standalone-initialized Incus cannot convert to a cluster member without a
+  #     wipe, so joiners must stay uninitialized until the converge join-init.
+  effectivePreseed =
+    if isJoiner then null
+    else lib.recursiveUpdate (if isBootstrap then bootstrapPreseed else basePreseed) cfg.preseed;
+
   # Instances bound to THIS node.
   thisInstances = lib.filterAttrs (_: i: i.node == thisMember) cfg.instances;
 
@@ -108,6 +190,29 @@ in
 
     uiEnable = lib.mkEnableOption "the Incus web UI";
 
+    # Multi-node clustering role, populated per member by the cluster-level
+    # incus module (cluster-modules/incus.nix). Left at defaults for standalone
+    # single-node use (cluster.enable = false -> pre-clustering behavior).
+    cluster = {
+      enable = lib.mkEnableOption "multi-node Incus clustering for this node";
+
+      bootstrapMember = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Name of the cluster member that bootstraps the Incus cluster. When it
+          equals this member's name this node is initialized as the bootstrap;
+          all other members are joiners (joined at runtime by converge).
+        '';
+      };
+
+      httpsPort = lib.mkOption {
+        type = lib.types.int;
+        default = 8443;
+        description = "Port for the Incus HTTPS API / cluster member address.";
+      };
+    };
+
     preseed = lib.mkOption {
       type = lib.types.attrs;
       default = {};
@@ -133,46 +238,19 @@ in
       enable = true;
       ui.enable = cfg.uiEnable;
 
-      # Declarative, idempotent init. `incus admin init --preseed` is applied
-      # on activation and reconciles the existing state to this spec.
-      preseed = lib.recursiveUpdate {
-        networks = [{
-          name = cfg.bridgeName;
-          type = "bridge";
-          config = {
-            "ipv4.address" = cfg.bridgeAddress;
-            "ipv4.nat" = "true";
-            "ipv6.address" = "none";
-          };
-        }];
-
-        storage_pools = [({
-          name = cfg.storagePool;
-          driver = cfg.storageBackend;
-        } // lib.optionalAttrs (cfg.storageSource != null) {
-          config.source = cfg.storageSource;
-        })];
-
-        profiles = [{
-          name = "default";
-          devices = {
-            eth0 = {
-              name = "eth0";
-              network = cfg.bridgeName;
-              type = "nic";
-            };
-            root = {
-              path = "/";
-              pool = cfg.storagePool;
-              type = "disk";
-            };
-          };
-        }];
-      } cfg.preseed;
+      # Declarative, idempotent init. `incus admin init --preseed` is applied on
+      # activation (standalone or cluster bootstrap) and reconciles existing
+      # state to this spec. Joiners get `null` and stay uninitialized until the
+      # converge join-init (see `effectivePreseed`).
+      preseed = effectivePreseed;
     };
 
     # Incus client/tooling on the node and kernel bits for containers.
     environment.systemPackages = with pkgs; [ incus ];
+
+    # Upstream `virtualisation.incus` asserts nftables (it is unsupported on
+    # iptables). mkDefault so a node can still opt out/override deliberately.
+    networking.nftables.enable = lib.mkDefault true;
 
     # Required for container/VM networking and nesting.
     boot.kernel.sysctl = {
