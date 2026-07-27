@@ -299,6 +299,26 @@ let
             mkdir -p "$KH_DIR"; touch "$KH_FILE"
             SSH_OPTS=(-o UserKnownHostsFile="$KH_FILE" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
 
+            # The operator passes the cluster SSH key via NIX_SSHOPTS ("-i <path>
+            # ..."), but plain ssh (the member probe below) and the module steps
+            # (incus over ssh) do NOT read NIX_SSHOPTS. Extract that identity and
+            # install it as the default key so every direct ssh/scp — and
+            # nixos-anywhere/nixos-rebuild — authenticates with the cluster key.
+            if [[ -n "''${NIX_SSHOPTS:-}" ]]; then
+              # Parse the "-i <path>" identity out of NIX_SSHOPTS with pure bash
+              # (no sed/awk — keep runtimeInputs minimal).
+              CLUSTER_KEY=""
+              if [[ "''${NIX_SSHOPTS}" =~ -i[[:space:]]+([^[:space:]]+) ]]; then
+                CLUSTER_KEY="''${BASH_REMATCH[1]}"
+              fi
+              if [[ -n "''${CLUSTER_KEY:-}" && -r "''${CLUSTER_KEY}" ]]; then
+                SSH_HOME="''${HOME:-/root}/.ssh"
+                mkdir -p "$SSH_HOME"; chmod 700 "$SSH_HOME"
+                install -m 600 "''${CLUSTER_KEY}" "$SSH_HOME/id_ed25519"
+                log "[ssh] installed cluster identity from NIX_SSHOPTS at $SSH_HOME/id_ed25519"
+              fi
+            fi
+
             member_ip() {
               case "$1" in
               ${memberIpCases}
