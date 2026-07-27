@@ -411,25 +411,26 @@ in
     };
 
     # converge postSteps:
-    #  - incus.reconcile (always, when there are incus nodes): re-apply the
-    #    preseed + instance reconcile. Reuses the EXISTING `incus init` action.
     #  - incus.cluster-join (only when clustering): mint single-use join tokens
     #    on the bootstrap and join each joiner via `incus admin init --preseed`.
-    #    Runs AFTER reconcile (priority 75 > 70) per the converge design; it is
-    #    idempotent (skips members already in `incus cluster list`).
+    #    Runs BEFORE reconcile (priority 65 < 70) so a joiner is already a cluster
+    #    member when its declared instances reconcile; idempotent (skips members
+    #    already in `incus cluster list`).
+    #  - incus.reconcile (always, when there are incus nodes): re-apply the
+    #    preseed + instance reconcile. Reuses the EXISTING `incus init` action.
     converge.postSteps = lib.mkMerge [
+      (lib.mkIf clusterEnabled {
+        "incus.cluster-join" = {
+          description = "Join Incus cluster members to the bootstrap node";
+          priority = 65;
+          run = incusCommands.cluster-join.builder;
+        };
+      })
       (lib.mkIf (incusMemberNames != []) {
         "incus.reconcile" = {
           description = "Re-apply Incus preseed + instance reconcile on nodes";
           priority = 70;
           run = incusCommands.init.builder;
-        };
-      })
-      (lib.mkIf clusterEnabled {
-        "incus.cluster-join" = {
-          description = "Join Incus cluster members to the bootstrap node";
-          priority = 75;
-          run = incusCommands.cluster-join.builder;
         };
       })
     ];
