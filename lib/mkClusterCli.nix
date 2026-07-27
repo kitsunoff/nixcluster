@@ -293,11 +293,32 @@ let
                 <<<"$STEPS_JSON")
             }
 
-            # --- known_hosts pin (B3), shared with install --------------------
-            KH_DIR="./.nixcluster/known_hosts"
-            KH_FILE="$KH_DIR/${clusterName}"
-            mkdir -p "$KH_DIR"; touch "$KH_FILE"
-            SSH_OPTS=(-o UserKnownHostsFile="$KH_FILE" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+            # No host-key pinning on the converge path: converge reinstalls
+            # members (nixos-anywhere), which CHANGES their ssh host key mid-run,
+            # so accept-new (which rejects a *changed* key) would fail every
+            # post-install step. Matches the operator-injected NIX_SSHOPTS, which
+            # also disables host-key checking for exactly this reason.
+            SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+
+            # The operator passes the cluster SSH key via NIX_SSHOPTS ("-i <path>
+            # ..."), but plain ssh (the member probe below) and the module steps
+            # (incus over ssh) do NOT read NIX_SSHOPTS. Extract that identity and
+            # install it as the default key so every direct ssh/scp — and
+            # nixos-anywhere/nixos-rebuild — authenticates with the cluster key.
+            if [[ -n "''${NIX_SSHOPTS:-}" ]]; then
+              # Parse the "-i <path>" identity out of NIX_SSHOPTS with pure bash
+              # (no sed/awk — keep runtimeInputs minimal).
+              CLUSTER_KEY=""
+              if [[ "''${NIX_SSHOPTS}" =~ -i[[:space:]]+([^[:space:]]+) ]]; then
+                CLUSTER_KEY="''${BASH_REMATCH[1]}"
+              fi
+              if [[ -n "''${CLUSTER_KEY:-}" && -r "''${CLUSTER_KEY}" ]]; then
+                SSH_HOME="''${HOME:-/root}/.ssh"
+                mkdir -p "$SSH_HOME"; chmod 700 "$SSH_HOME"
+                install -m 600 "''${CLUSTER_KEY}" "$SSH_HOME/id_ed25519"
+                log "[ssh] installed cluster identity from NIX_SSHOPTS at $SSH_HOME/id_ed25519"
+              fi
+            fi
 
             member_ip() {
               case "$1" in
@@ -356,9 +377,9 @@ let
                 INSTALLED)
                   log "=== switch $member ($ip) [nixos-rebuild] ==="
                   # nixos-rebuild reads its ssh options ONLY from NIX_SSHOPTS, not
-                  # from our SSH_OPTS array, so pass the same known_hosts pin there
-                  # or the switch fails host-key verification in a non-interactive
-                  # (NIO / automation) re-converge.
+                  # from our SSH_OPTS array — pass the same (no-host-key-check)
+                  # options there so the switch works non-interactively (the node
+                  # was just reinstalled, so its host key changed).
                   if NIX_SSHOPTS="''${SSH_OPTS[*]}" nixos-rebuild switch --flake ".#${clusterName}-$member" --target-host "root@$ip"; then
                     end=$(date +%s); add_member "$member" "$ip" switch Applied "" $((end - start))
                   else
@@ -369,7 +390,6 @@ let
                   log "=== install $member ($ip) [nixos-anywhere] ==="
                   if nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}"; then
                     end=$(date +%s); add_member "$member" "$ip" install Applied "" $((end - start))
-                    ssh-keyscan -H "$ip" >> "$KH_FILE" 2>/dev/null || true
                   else
                     end=$(date +%s); add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
                   fi

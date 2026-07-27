@@ -49,18 +49,16 @@ let
     else null;
   joinerNames = lib.filter (n: n != resolvedBootstrap) (lib.attrNames config.members);
 
-  # Shell prelude: resolve a member -> install.ip and ssh with a PINNED
-  # known_hosts (B3 runtime phase — no StrictHostKeyChecking=no). The host key
-  # is pinned by `install` into .nixcluster/known_hosts/<cluster>; accept-new
-  # tolerates a not-yet-pinned host without disabling verification entirely.
+  # Shell prelude: resolve a member -> install.ip and ssh to it. Host-key
+  # checking is disabled because converge reinstalls members (nixos-anywhere),
+  # which changes their ssh host key mid-run — pinned/accept-new verification
+  # would then reject the post-install connection. The identity is the cluster
+  # key installed by the converge preamble (~/.ssh/id_ed25519).
   nodeIpCases = lib.concatStringsSep "\n        " (lib.mapAttrsToList
     (name: member: ''${name}) echo "${member.install.ip or ""}" ;;'')
     incusMembers);
 
   sshPrelude = ''
-    KNOWN_HOSTS=".nixcluster/known_hosts/${clusterName}"
-    mkdir -p "$(dirname "$KNOWN_HOSTS")"
-    touch "$KNOWN_HOSTS"
     node_ip() {
       case "$1" in
         ${nodeIpCases}
@@ -71,7 +69,7 @@ let
       local node="$1"; shift
       local ip; ip="$(node_ip "$node")"
       if [ -z "$ip" ]; then echo "no install.ip for node '$node'" >&2; return 1; fi
-      ssh -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=5 "root@$ip" "$@"
     }
   '';

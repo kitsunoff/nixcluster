@@ -45,9 +45,6 @@ let
     nebulaMembers);
 
   sshPrelude = ''
-    KNOWN_HOSTS=".nixcluster/known_hosts/${clusterName}"
-    mkdir -p "$(dirname "$KNOWN_HOSTS")"
-    touch "$KNOWN_HOSTS"
     node_ip() {
       case "$1" in
         ${nodeIpCases}
@@ -58,7 +55,11 @@ let
       local node="$1"; shift
       local ip; ip="$(node_ip "$node")"
       if [ -z "$ip" ]; then echo "no install.ip for node '$node'" >&2; return 1; fi
-      ssh -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=accept-new \
+      # No host-key pinning: converge reinstalls nodes (nixos-anywhere), which
+      # changes their ssh host key mid-run, so accept-new would reject the
+      # post-install connection. nebula.up runs as a converge postStep. Uses the
+      # cluster identity installed by the converge preamble (~/.ssh/id_ed25519).
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=5 "root@$ip" "$@"
     }
   '';
