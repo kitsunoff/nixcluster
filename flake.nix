@@ -26,6 +26,14 @@
         inherit system;
       });
 
+      # Single-source per-system projection (apps + packages) shared with the
+      # flake-parts module and standalone mkFlakeOutputs.
+      perSystemOutputs = forAllSystems ({ pkgs, ... }:
+        nixclusterLib.mkPerSystemOutputs {
+          inherit pkgs;
+          clusterConfigurations = self.clusterConfigurations;
+        });
+
     in
     {
       # Export library functions
@@ -45,26 +53,17 @@
       };
       templates.nixcluster = self.templates.default;
 
-      # Packages
-      packages = forAllSystems ({ pkgs, ... }: {
-        nixclusterctl = import ./packages/nixclusterctl.nix { inherit pkgs; };
-      });
+      # Packages - per-cluster buildable CLIs + nixclusterctl dispatcher.
+      packages = lib.mapAttrs (_system: o: o.packages) perSystemOutputs;
 
-      # Apps - cluster CLIs
-      apps = forAllSystems ({ pkgs, ... }:
-        lib.mapAttrs' (name: cluster:
-          lib.nameValuePair "cluster-${name}" {
-            type = "app";
-            program = lib.getExe (cluster.cli pkgs);
-          }
-        ) self.clusterConfigurations
-      );
+      # Apps - runnable per-cluster CLIs.
+      apps = lib.mapAttrs (_system: o: o.apps) perSystemOutputs;
 
       # DevShell
-      devShells = forAllSystems ({ pkgs, ... }: {
+      devShells = forAllSystems ({ pkgs, system }: {
         default = pkgs.mkShell {
           packages = [
-            (import ./packages/nixclusterctl.nix { inherit pkgs; })
+            self.packages.${system}.nixclusterctl
           ];
         };
       });

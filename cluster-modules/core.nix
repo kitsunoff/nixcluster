@@ -46,7 +46,12 @@ let
     options = {
       nixosConfiguration = lib.mkOption {
         type = lib.types.raw;
-        description = "Base NixOS configuration to extend";
+        default = null;
+        description = ''
+          Base NixOS configuration to extend. Optional: when unset (e.g. for
+          members injected as pure JSON data), the cluster-level
+          defaultNixosConfiguration is used instead.
+        '';
       };
 
       install = lib.mkOption {
@@ -78,6 +83,16 @@ in
       type = lib.types.attrsOf memberModule;
       default = {};
       description = "Cluster members";
+    };
+
+    # Cluster-wide default base NixOS configuration. Members that do not set
+    # their own `nixosConfiguration` inherit this. Enables members supplied as
+    # pure JSON data (which cannot carry a Nix value/function) to still resolve
+    # to a working nixosConfiguration.
+    defaultNixosConfiguration = lib.mkOption {
+      type = lib.types.raw;
+      default = null;
+      description = "Cluster-wide default base NixOS configuration; members inherit this when they do not set their own nixosConfiguration.";
     };
 
     # Top-level (core) CLI commands: nixclusterctl <cluster> <command> [args].

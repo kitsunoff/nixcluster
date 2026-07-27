@@ -21,7 +21,7 @@
 # top-level `clusterModules` output, e.g. by import-tree over ./modules) are
 # both offered to cluster definitions via the `clusterModules` module argument;
 # nothing is auto-applied — the user imports explicitly (A3/A5).
-{ lib, mkClusterOutputs, coreModule, builtinClusterModules }:
+{ lib, mkClusterOutputs, mkPerSystemOutputs, coreModule, builtinClusterModules }:
 
 # flake-parts top-level module. `self`/`inputs` here are the DOWNSTREAM flake's.
 { config, self, inputs, ... }:
@@ -69,13 +69,10 @@ in
       built;
   };
 
-  # Per-system cluster CLIs: nix run .#cluster-<name>.
-  config.perSystem = { pkgs, ... }: {
-    apps = lib.mapAttrs'
-      (name: c: lib.nameValuePair "cluster-${name}" {
-        type = "app";
-        program = lib.getExe (c.cli pkgs);
-      })
-      built;
-  };
+  # Per-system outputs (apps + packages) from the single-source projection:
+  #   apps.cluster-<name>     (nix run .#cluster-<name>)
+  #   packages.cluster-<name> (nix build .#cluster-<name>)
+  #   packages.nixclusterctl  (static dispatcher)
+  config.perSystem = { pkgs, ... }:
+    mkPerSystemOutputs { inherit pkgs; clusterConfigurations = built; };
 }

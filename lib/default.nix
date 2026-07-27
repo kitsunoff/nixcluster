@@ -5,7 +5,9 @@ rec {
   mkCluster = import ./mkCluster.nix { inherit lib inputs; };
   mkClusterCli = import ./mkClusterCli.nix { inherit lib; };
   mkClusterOutputs = import ./clusterOutputs.nix { inherit lib; };
-  mkFlakeOutputs = import ./mkFlakeOutputs.nix { inherit lib inputs; };
+  mkNixclusterctl = import ./mkNixclusterctl.nix { inherit lib; };
+  mkPerSystemOutputs = import ./flakeOutputs.nix { inherit lib mkNixclusterctl; };
+  mkFlakeOutputs = import ./mkFlakeOutputs.nix { inherit lib inputs mkPerSystemOutputs; };
 
   # Core cluster module path.
   coreModule = ../cluster-modules/core.nix;
@@ -26,6 +28,6 @@ rec {
 
   # flake-parts module providing the declarative `nixcluster` option.
   flakeModule = import ./flakeModule.nix {
-    inherit lib mkClusterOutputs coreModule builtinClusterModules;
+    inherit lib mkClusterOutputs mkPerSystemOutputs coreModule builtinClusterModules;
   };
 }
