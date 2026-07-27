@@ -230,5 +230,23 @@ in
       description = "Nebula mesh VPN management";
       actions = nebulaCommands;
     };
+
+    # converge steps: issue certs before members install (preStep, after
+    # sops.gen), and bring the mesh up after members switch (postStep, before
+    # k3s). Reuses the nebula action builders (no duplicated logic).
+    converge.preSteps = lib.mkIf (nebulaMemberNames != []) {
+      "nebula.gen-certs" = {
+        description = "Generate Nebula CA + per-host certs into sops";
+        priority = 20;
+        run = nebulaCommands.gen-certs.builder;
+      };
+    };
+    converge.postSteps = lib.mkIf (nebulaMemberNames != []) {
+      "nebula.up" = {
+        description = "(Re)start Nebula on mesh nodes";
+        priority = 10;
+        run = nebulaCommands.up.builder;
+      };
+    };
   };
 }
