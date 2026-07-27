@@ -206,6 +206,214 @@ let
           '';
         };
     };
+    # converge (task E): orchestrate a whole cluster in one shot — run
+    # cluster-level preSteps, install/switch every member (bootstrap first,
+    # install-once vs switch decided by an SSH probe), run postSteps, then emit
+    # a single machine-readable result line. Reuses the install/apply member->IP
+    # `case`, the `.#<cluster>-<member>` flake attr, and the known_hosts pin;
+    # step logic is reused from the modules (never reimplemented here).
+    converge = {
+      description = "Converge the whole cluster (preSteps -> per-member install/switch -> postSteps)";
+      builder = { pkgs, lib, cluster, helpers, ... }:
+        let
+          # Deterministic member order: bootstrapMember (if set) leads, the rest
+          # follow the explicit `order` (if set) or sorted-by-name.
+          sortedMembers = lib.sort (a: b: a < b) memberNames;
+          explicitOrder = cluster.converge.order or [];
+          bootstrapMember = cluster.converge.bootstrapMember or null;
+          baseOrder = if explicitOrder != [] then explicitOrder else sortedMembers;
+          convergeOrder =
+            if bootstrapMember != null
+            then [ bootstrapMember ] ++ (lib.filter (m: m != bootstrapMember) baseOrder)
+            else baseOrder;
+
+          # Steps ordered by priority then name (deterministic; §4, minimal).
+          sortSteps = steps:
+            lib.sort
+              (a: b: if a.priority != b.priority then a.priority < b.priority else a.name < b.name)
+              (lib.mapAttrsToList (name: s: s // { inherit name; }) steps);
+
+          preStepsSorted = sortSteps (cluster.converge.preSteps or {});
+          postStepsSorted = sortSteps (cluster.converge.postSteps or {});
+
+          # Build each step's package once and emit a `run_step` invocation.
+          mkStepRuns = phase: steps: lib.concatMapStringsSep "\n" (s:
+            ''run_step ${lib.escapeShellArg s.name} ${lib.escapeShellArg phase} ${lib.escapeShellArg (lib.getExe (s.run { inherit pkgs lib cluster helpers; }))}''
+          ) steps;
+
+          # member -> default install.ip, reusing the install/apply case shape.
+          memberIpCases = lib.concatStringsSep "\n              " (lib.mapAttrsToList
+            (name: member: ''${name}) echo "${member.install.ip or ""}" ;;'')
+            cluster.members);
+
+          orderArray = lib.concatStringsSep " " (map lib.escapeShellArg convergeOrder);
+        in
+        pkgs.writeShellApplication {
+          name = "nixclusterctl-${clusterName}-converge";
+          runtimeInputs = with pkgs; [ nixos-anywhere nixos-rebuild openssh jq coreutils ];
+          text = ''
+            set -euo pipefail
+
+            JSON=0
+            DRY_RUN=0
+            AGE_KEY_FILE=""
+            EXTRA_FILES=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --json) JSON=1; shift ;;
+                --dry-run) DRY_RUN=1; shift ;;
+                --age-key-file) AGE_KEY_FILE="''${2:-}"; shift 2 ;;
+                --extra-files) EXTRA_FILES="''${2:-}"; shift 2 ;;
+                -h|--help)
+                  echo "Usage: nixclusterctl ${clusterName} converge [--json] [--dry-run] [--age-key-file <path>] [--extra-files <dir>]" >&2
+                  exit 0 ;;
+                *) echo "Unknown flag: $1" >&2; exit 1 ;;
+              esac
+            done
+
+            # All human output goes to stderr; stdout carries ONLY the result
+            # line so `--json` yields a bare object and greppers get one marker.
+            log() { echo "$@" >&2; }
+
+            # --- accumulators (built with jq; never hand-concatenated) ---------
+            MEMBERS_JSON='[]'
+            STEPS_JSON='[]'
+
+            add_member() { # name ip action status message durationSeconds
+              MEMBERS_JSON=$(jq -c \
+                --arg name "$1" --arg ip "$2" --arg action "$3" \
+                --arg status "$4" --arg message "$5" --argjson dur "$6" \
+                '. += [{name:$name,ip:$ip,action:$action,status:$status,message:$message,durationSeconds:$dur}]' \
+                <<<"$MEMBERS_JSON")
+            }
+            add_step() { # name phase status message
+              STEPS_JSON=$(jq -c \
+                --arg name "$1" --arg phase "$2" --arg status "$3" --arg message "$4" \
+                '. += [{name:$name,phase:$phase,status:$status,message:$message}]' \
+                <<<"$STEPS_JSON")
+            }
+
+            # --- known_hosts pin (B3), shared with install --------------------
+            KH_DIR="./.nixcluster/known_hosts"
+            KH_FILE="$KH_DIR/${clusterName}"
+            mkdir -p "$KH_DIR"; touch "$KH_FILE"
+            SSH_OPTS=(-o UserKnownHostsFile="$KH_FILE" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+
+            member_ip() {
+              case "$1" in
+              ${memberIpCases}
+                *) echo "" ;;
+              esac
+            }
+
+            # --extra-files staging mirrors `install`: the age private key lands
+            # at /etc/age/key.txt (0600) on the node, outside the nix store.
+            STAGED=""
+            cleanup() { [[ -n "$STAGED" ]] && rm -rf "$STAGED"; return 0; }
+            trap cleanup EXIT
+            EF_ARGS=()
+            if [[ -n "$AGE_KEY_FILE" ]]; then
+              STAGED=$(mktemp -d)
+              install -m 600 -D "$AGE_KEY_FILE" "$STAGED/etc/age/key.txt"
+              EF_ARGS+=(--extra-files "$STAGED")
+            elif [[ -n "$EXTRA_FILES" ]]; then
+              EF_ARGS+=(--extra-files "$EXTRA_FILES")
+            fi
+
+            run_step() { # name phase exe
+              local name="$1" phase="$2" exe="$3"
+              if [[ "$DRY_RUN" -eq 1 ]]; then
+                log "  [step:$phase] $name (dry-run, not executed)"
+                add_step "$name" "$phase" skipped "dry-run"
+                return 0
+              fi
+              log "=== step [$phase] $name ==="
+              if "$exe"; then
+                add_step "$name" "$phase" ok ""
+              else
+                add_step "$name" "$phase" failed "step exited non-zero"
+              fi
+            }
+
+            converge_member() { # member
+              local member="$1" ip probe start end
+              ip="$(member_ip "$member")"
+              if [[ "$DRY_RUN" -eq 1 ]]; then
+                log "  [member] $member -> ''${ip:-<no-ip>} (dry-run, not probed)"
+                add_member "$member" "$ip" noop Skipped "dry-run" 0
+                return 0
+              fi
+              if [[ -z "$ip" ]]; then
+                log "  [member] $member has no install.ip; skipping"
+                add_member "$member" "" noop Failed "no install.ip for $member" 0
+                return 0
+              fi
+              start=$(date +%s)
+              probe=$(ssh "''${SSH_OPTS[@]}" "root@$ip" \
+                'test -e /run/current-system && echo INSTALLED || echo FRESH' 2>/dev/null \
+                || echo UNREACHABLE)
+              case "$probe" in
+                INSTALLED)
+                  log "=== switch $member ($ip) [nixos-rebuild] ==="
+                  if nixos-rebuild switch --flake ".#${clusterName}-$member" --target-host "root@$ip"; then
+                    end=$(date +%s); add_member "$member" "$ip" switch Applied "" $((end - start))
+                  else
+                    end=$(date +%s); add_member "$member" "$ip" switch Failed "nixos-rebuild switch failed" $((end - start))
+                  fi
+                  ;;
+                FRESH)
+                  log "=== install $member ($ip) [nixos-anywhere] ==="
+                  if nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}"; then
+                    end=$(date +%s); add_member "$member" "$ip" install Applied "" $((end - start))
+                    ssh-keyscan -H "$ip" >> "$KH_FILE" 2>/dev/null || true
+                  else
+                    end=$(date +%s); add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
+                  fi
+                  ;;
+                *)
+                  end=$(date +%s); add_member "$member" "$ip" noop Failed "unreachable ($probe)" $((end - start))
+                  ;;
+              esac
+            }
+
+            log "Converging cluster '${clusterName}'"
+            log "Member order: ${lib.concatStringsSep " " convergeOrder}"
+            log ""
+
+            # 1) preSteps
+            log "--- preSteps ---"
+            ${mkStepRuns "pre" preStepsSorted}
+
+            # 2) per-member install/switch loop
+            log "--- members ---"
+            ORDER=(${orderArray})
+            for m in "''${ORDER[@]}"; do
+              converge_member "$m"
+            done
+
+            # 3) postSteps
+            log "--- postSteps ---"
+            ${mkStepRuns "post" postStepsSorted}
+
+            # 4) result + emit
+            RESULT=$(jq -rn --argjson m "$MEMBERS_JSON" --argjson s "$STEPS_JSON" '
+              if ($m | any(.status=="Failed")) or ($s | any(.status=="failed")) then "failed"
+              elif ($m | any(.status=="Skipped")) or ($s | any(.status=="skipped")) then "partial"
+              else "success" end')
+            FINAL=$(jq -n -c \
+              --arg cluster "${clusterName}" --arg result "$RESULT" \
+              --argjson members "$MEMBERS_JSON" --argjson steps "$STEPS_JSON" \
+              '{cluster:$cluster,result:$result,members:$members,steps:$steps}')
+
+            log ""
+            if [[ "$JSON" -eq 1 ]]; then
+              printf '%s\n' "$FINAL"
+            else
+              printf '::nixcluster:result:: %s\n' "$FINAL"
+            fi
+          '';
+        };
+    };
   };
 
   # Top-level commands = base + any contributed via cluster.commands (attrsOf).
