@@ -9,6 +9,10 @@ let
   # Import NixOS module path
   k3sNixosModule = ../modules/nixos/nixcluster-k3s.nix;
 
+  # Shared registry-diff engine (see lib/prune.nix): every module that reconciles
+  # membership downward uses it, so the dangerous part exists exactly once.
+  mkPruneStep = import ../lib/prune.nix { inherit lib; };
+
   # Get k3s members from members config (via k3s.role NixOS option)
   k3sMembers = lib.filterAttrs
     (name: member: member.k3s.role or null != null)
@@ -28,6 +32,109 @@ let
   firstServerIp = if firstServer != null
     then config.members.${firstServer}.install.ip or null
     else null;
+
+  # Registry names (Kubernetes node names) of the desired k3s members, via core's
+  # canonical mapping — never re-derived here.
+  desiredNodeNames = map (member: config.memberRegistryNames.${member}) allK3sMembers;
+
+  # Smallest number of nodes the registry must keep. Embedded etcd needs a
+  # majority of its members to elect a leader, so with N registered nodes we may
+  # only prune down to floor(N/2)+1. That bound is computed against the LIVE
+  # registry inside the step (we cannot know here how many nodes are actually
+  # registered), so what we pass is the majority of the DESIRED server count —
+  # the floor below which the control plane certainly cannot function.
+  serverQuorumMinimum =
+    if servers == [] then 0 else (builtins.length servers) / 2 + 1;
+
+  # Removing a k3s node, in the order the k3s maintainers require:
+  #
+  #   1. cordon + drain, bounded, so workloads move off before the node goes;
+  #   2. stop the k3s unit ON the node — a server whose service keeps running
+  #      rejoins the etcd cluster after being deleted (k3s-io/k3s#4023). NixOS has
+  #      no `k3s-uninstall.sh`, so stopping the unit is the whole host-side story
+  #      and it is best-effort;
+  #   3. for a SERVER, remove the embedded etcd member. `kubectl delete node` does
+  #      NOT do this (k3s-io/k3s#4865): the supported way is the
+  #      `etcd.k3s.cattle.io/remove=true` annotation, which shuts etcd down on
+  #      that node — so it must come after draining, never before;
+  #   4. delete the Node object.
+  #
+  # An unreachable node (already wiped, the common case) skips 1 and 2 and has its
+  # Node object and etcd member removed from a surviving server.
+  pruneRemoveEntry = ''
+    local node="$1" reachable="$2"
+
+    if [[ "$reachable" == "reachable" ]]; then
+      kubectl cordon "$node" || true
+      # Bounded: a stuck pod must not hold the whole converge run.
+      kubectl drain "$node" \
+        --ignore-daemonsets \
+        --delete-emptydir-data \
+        --timeout=${toString cfg.prune.drainTimeoutSeconds}s || \
+        log "drain of $node did not finish cleanly; continuing"
+
+      # Best-effort: NixOS has no k3s-uninstall.sh. Without this a server rejoins.
+      ssh_stop_k3s "$node" || log "could not stop the k3s unit on $node; continuing"
+    fi
+
+    if is_server "$node"; then
+      # Ask k3s to remove the etcd member. Deleting the Node alone leaves it
+      # behind and the survivors keep dialling a machine that is gone.
+      kubectl annotate node "$node" etcd.k3s.cattle.io/remove=true --overwrite || \
+        log "could not annotate $node for etcd removal; the member may need etcdctl"
+    fi
+
+    kubectl delete node "$node" --ignore-not-found --wait=false
+  '';
+
+  # Everything the prune step needs before it starts: the kubeconfig converge
+  # fetched, and helpers that answer questions about a node that is no longer in
+  # the cluster definition — so its role and address come from the REGISTRY, the
+  # only place that still knows them.
+  prunePrelude = ''
+    export KUBECONFIG="kubeconfig/${clusterName}.yaml"
+    if [[ ! -f "$KUBECONFIG" ]]; then
+      log "no kubeconfig at $KUBECONFIG; run the k3s.kubeconfig step first"
+      exit 0
+    fi
+
+    SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes)
+
+    # A departing node's address is not in the cluster definition any more; the
+    # Node object still has it.
+    node_ip() {
+      kubectl get node "$1" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true
+    }
+
+    # Purpose-specific rather than a generic "run this string over there": the
+    # remote command is a literal, so there is no question about which side
+    # expands what.
+    ssh_reachable() { # node
+      local ip
+      ip="$(node_ip "$1")"
+      [[ -n "$ip" ]] || return 1
+      ssh "''${SSH_OPTS[@]}" "root@$ip" 'true'
+    }
+
+    ssh_stop_k3s() { # node
+      local ip
+      ip="$(node_ip "$1")"
+      [[ -n "$ip" ]] || return 1
+      ssh "''${SSH_OPTS[@]}" "root@$ip" 'systemctl stop k3s k3s-agent 2>/dev/null || true'
+    }
+
+    # Role from the registry's own labels, not from our config: the node we are
+    # removing is by definition absent from the config.
+    is_server() {
+      kubectl get node "$1" \
+        -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null |
+        grep --quiet true
+    }
+  '';
+
+  pruneProbeHost = ''
+    ssh_reachable "$1" >/dev/null 2>&1
+  '';
 
   # CLI commands
   k3sCommands = {
@@ -143,6 +250,16 @@ in
 {
   options.k3s = {
     enable = lib.mkEnableOption "k3s cluster";
+
+    prune.drainTimeoutSeconds = lib.mkOption {
+      type = lib.types.int;
+      default = 120;
+      description = ''
+        How long to wait for a departing node to drain before removing it anyway.
+        Bounded on purpose: a pod that will not evict must not hold the whole
+        converge run open.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -184,6 +301,28 @@ in
             priority = 35;
             deps = serverSteps;
             run = k3sCommands.kubeconfig.builder;
+          };
+
+          # Membership is reconciled in BOTH directions: this removes nodes that
+          # are registered but no longer in the cluster definition. It waits for
+          # every member step and for the kubeconfig, so the desired members have
+          # converged before anything is taken away.
+          "k3s.prune" = {
+            description = "Remove departed members from the Kubernetes registry";
+            phase = "post";
+            priority = 40;
+            deps = (map memberStepName allK3sMembers) ++ [ "k3s.kubeconfig" ];
+            run = { pkgs, ... }: mkPruneStep {
+              inherit pkgs;
+              subject = "k3s";
+              runtimeInputs = with pkgs; [ kubectl openssh gnugrep ];
+              desired = desiredNodeNames;
+              quorumMinimum = serverQuorumMinimum;
+              prelude = prunePrelude;
+              probeHost = pruneProbeHost;
+              listRegistry = ''kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' '';
+              removeEntry = pruneRemoveEntry;
+            };
           };
         }
         # The first server leads: it depends on the preparation steps only. This

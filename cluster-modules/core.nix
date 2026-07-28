@@ -316,6 +316,27 @@ in
       description = "Convergence orchestration for the `converge` command.";
     };
 
+    # The name a member goes by in a RUNTIME registry — a Kubernetes node name,
+    # an Incus cluster member name, a nebula host name. Read-only and computed:
+    # every module that reconciles a registry against the desired member set must
+    # use this one mapping, or the two sides disagree about who is who and a diff
+    # produces phantom additions and removals.
+    #
+    # The value is the member's `networking.hostName` when it sets one (that is
+    # what the node reports to a registry), else the member's own name.
+    memberRegistryNames = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      readOnly = true;
+      default = lib.mapAttrs
+        (memberName: member: member.networking.hostName or memberName)
+        config.members;
+      description = ''
+        Member name -> the name that member goes by in a runtime registry
+        (Kubernetes node, Incus cluster member, ...). Computed from
+        `networking.hostName`, falling back to the member name.
+      '';
+    };
+
     # Internal: flake inputs, threaded in by mkCluster so cluster modules can
     # reference inputs.<name> (e.g. pxe installer needs inputs.disko).
     _inputs = lib.mkOption {
