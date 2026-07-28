@@ -9,6 +9,51 @@ Declarative NixOS-based Kubernetes cluster management with module system.
 - **CLI Tool** — `nixclusterctl` for managing clusters
 - **Secrets Management** — sops-based encrypted secrets with age
 
+## Start from a scenario template
+
+The fastest way in is a template that already describes a working cluster. Each
+one ships a README naming exactly which values to change (addresses, disks, SSH
+keys).
+
+| Template | What you get |
+| --- | --- |
+| `k3s-single` | one k3s server — the minimal k3s scenario |
+| `k3s-ha` | three etcd servers plus two agents, with the full converge ordering contract |
+| `incus-cluster` | three Incus members; two carry nothing but an address |
+| `default` | the bare skeleton: flake-parts + import-tree, no scenario |
+
+```bash
+mkdir my-cluster && cd my-cluster
+nix flake init --template github:kitsunoff/nixcluster#k3s-ha
+
+# Edit modules/nodes/*.nix (addresses) and modules/base.nix (disk, SSH key), then:
+nix run .#cluster-k3s-ha -- converge --dry-run
+```
+
+`converge` is a dependency graph, so `--dry-run` prints the real plan:
+
+```text
+member-server-1 ──┬──> member-server-2 ──┐
+                  ├──> member-server-3 ──┼──> member-agent-1
+                  │                      ├──> member-agent-2
+                  └──────────────────────┴──> k3s.bootstrap
+                                              k3s.kubeconfig
+```
+
+Every template is verified by evaluation on every change:
+
+```bash
+scripts/check-templates.sh            # all templates
+scripts/check-templates.sh k3s-ha     # one of them
+```
+
+For each template the script locks a copy against this checkout and asserts the
+expected members, a NixOS configuration per member, the per-cluster CLI app, the
+resolved converge order, and the converge steps **with their dependencies** — so a
+template whose plan drifts from its documented contract fails loudly. It
+evaluates every member's `system.build.toplevel`, which catches option and type
+errors across the whole configuration, but builds nothing.
+
 ## Quick Start
 
 ```bash
