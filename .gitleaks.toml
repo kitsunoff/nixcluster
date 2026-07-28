@@ -1,0 +1,27 @@
+# gitleaks configuration.
+#
+# The default ruleset plus a narrow allowlist for what this repository
+# legitimately commits. Narrow on purpose: a broad allowlist is how a real secret
+# eventually gets through.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Encrypted or illustrative material that belongs in git"
+paths = [
+  # sops-encrypted secrets: the ciphertext is meant to be committed, and the age
+  # private key is gitignored and has never been in history.
+  '''secrets/.*\.ya?ml$''',
+  '''\.sops\.ya?ml$''',
+  # Public keys.
+  '''.*\.pub$''',
+  '''tests/authorized_keys$''',
+  # Lock files carry hashes.
+  '''flake\.lock$''',
+]
+regexes = [
+  # Documentation placeholders: obvious keyboard patterns used to illustrate the
+  # shape of a k3s token, not tokens.
+  '''aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7dE9fG''',
+  '''xY3zA5bC7dE9fG1hJ3kL5mN7pQ9rS1tU3vW5xY7zA9bC''',
+]

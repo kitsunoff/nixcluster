@@ -1,0 +1,59 @@
+name: Checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  templates:
+    name: Template evaluation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      - name: nix flake show
+        run: nix flake show
+
+      # Evaluates every registered template against this checkout: the expected
+      # members, a NixOS configuration per member, the per-cluster CLI app, the
+      # resolved converge order, and the converge steps WITH their deps. Also
+      # evaluates every member's toplevel, which catches option and type errors
+      # across the whole configuration — without building anything.
+      - name: Check templates
+        run: ./scripts/check-templates.sh
+
+  prune:
+    name: Prune logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      # Pruning is the only part of converge that deletes things, so its safety
+      # rules are verified on every change: the engine's branches against an
+      # injected registry, and the real k3s step against stubbed kubectl/ssh.
+      - name: Check prune logic
+        run: ./scripts/check-prune.sh
