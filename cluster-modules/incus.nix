@@ -432,5 +432,24 @@ in
         };
       })
     ];
+
+    # The Incus ordering contract: a joiner has no cluster to join until the
+    # bootstrap member is up, but joiners do not depend on each other. State that
+    # directly rather than relying on core's sequential default, which happens to
+    # produce a working order only because the bootstrap sorts first.
+    converge.steps = lib.mkIf (clusterEnabled && resolvedBootstrap != null) (
+      # The bootstrap leads: it waits for the preparation steps and nothing else.
+      # Stating this is not optional — core's default makes each member wait for
+      # the previous one in name order, so a bootstrap that does not sort first
+      # would wait for a joiner that is waiting for the bootstrap.
+      {
+        "member-${resolvedBootstrap}".deps = lib.attrNames config.converge.preSteps;
+      }
+      // lib.listToAttrs (map
+        (joiner: lib.nameValuePair "member-${joiner}" {
+          deps = [ "member-${resolvedBootstrap}" ];
+        })
+        joinerNames)
+    );
   };
 }

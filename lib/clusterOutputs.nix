@@ -6,6 +6,7 @@
 let
   mkClusterCli = import ./mkClusterCli.nix { inherit lib; };
   resolveMemberBase = import ./resolveMemberBase.nix { inherit lib; };
+  convergePlan = import ./convergePlan.nix { inherit lib; };
 
   # Keys that are nixcluster-specific, not NixOS patches.
   nixclusterKeys = [ "nixosConfiguration" "install" ];
@@ -44,6 +45,11 @@ let
 in
 {
   nixosConfigurations = lib.mapAttrs mkMemberNixosConfig cfg.members;
+
+  # Resolved converge execution order (topological over `converge.steps`).
+  # Exposed so downstream flakes and template checks can assert the ordering
+  # contract without building the CLI.
+  convergeOrder = convergePlan cfg;
 
   # CLI subcommand builder: pkgs -> package
   cli = pkgs: mkClusterCli { inherit pkgs; cluster = cfg; };

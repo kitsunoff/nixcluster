@@ -1,6 +1,6 @@
 # NixOS module for k3s configuration
 # Receives cluster context via nixcluster module args
-{ config, lib, pkgs, nixcluster, ... }:
+{ config, options, lib, pkgs, nixcluster, ... }:
 
 let
   cfg = config.k3s;
@@ -191,7 +191,8 @@ in
     };
   };
 
-  config = lib.mkIf (cfg.role != null) {
+  config = lib.mkIf (cfg.role != null) (lib.mkMerge [
+   {
     services.k3s = {
       enable = true;
       role = cfg.role;
@@ -216,11 +217,6 @@ in
       );
     };
 
-    # Declare the sops secret consumed above (sops-nix decrypts it to
-    # /run/secrets/k3s/token on activation).
-    sops.secrets = lib.mkIf sopsEnabled {
-      "k3s/token" = { };
-    };
 
     networking.firewall = {
       allowedTCPPorts = [ 6443 2379 2380 10250 ];
@@ -237,5 +233,17 @@ in
     };
 
     boot.kernelModules = [ "br_netfilter" "overlay" ];
-  };
+   }
+
+   # Declare the sops secret consumed above (sops-nix decrypts it to
+   # /run/secrets/k3s/token on activation). Guarded by option presence: a cluster
+   # that does not use sops must not be forced to import sops-nix just to get k3s,
+   # and merely *defining* `sops.secrets` — even under an mkIf that is false —
+   # requires the option to exist.
+   (lib.optionalAttrs (options ? sops) {
+     sops.secrets = lib.mkIf sopsEnabled {
+       "k3s/token" = { };
+     };
+   })
+  ]);
 }
