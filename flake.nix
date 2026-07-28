@@ -46,12 +46,34 @@
       flakeModules.nixcluster = nixclusterLib.flakeModule;
       flakeModules.default = nixclusterLib.flakeModule;
 
-      # Downstream flake template (task 02): flake-parts + import-tree + ./modules.
-      templates.default = {
-        path = ./template;
-        description = "nixcluster downstream flake (flake-parts + import-tree)";
+      # User-facing flake templates: one bare skeleton plus one per cluster
+      # scenario. `scripts/check-templates.sh` locks and evaluates every entry
+      # here, so a new template is checked as soon as it is registered.
+      templates = {
+        # The bare skeleton: flake-parts + import-tree + ./modules, no scenario.
+        default = {
+          path = ./templates/default;
+          description = "nixcluster downstream flake (flake-parts + import-tree)";
+        };
+
+        k3s-single = {
+          path = ./templates/k3s-single;
+          description = "single-server k3s cluster (minimal k3s scenario)";
+        };
+
+        k3s-ha = {
+          path = ./templates/k3s-ha;
+          description = "HA k3s cluster: 3 etcd servers + 2 agents";
+        };
+
+        incus-cluster = {
+          path = ./templates/incus-cluster;
+          description = "3-member Incus cluster (bootstrap + 2 data-only members)";
+        };
+
+        # Kept for compatibility: `#nixcluster` has always meant the skeleton.
+        nixcluster = self.templates.default;
       };
-      templates.nixcluster = self.templates.default;
 
       # Packages - per-cluster buildable CLIs + nixclusterctl dispatcher.
       packages = lib.mapAttrs (_system: o: o.packages) perSystemOutputs;
