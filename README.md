@@ -1,289 +1,230 @@
+<div align="center">
+
 # nixcluster
 
-Declarative NixOS-based Kubernetes cluster management with module system.
+**Declarative NixOS clusters, converged by one idempotent command**
 
-## Features
+Describe a cluster once — members, roles, modules — and `converge` installs what is missing, switches what has drifted, joins what has not joined, and removes what has left.
 
-- **Cluster Modules** — extensible architecture for k3s, sops, cozystack
-- **NixOS Integration** — cluster config generates NixOS configurations
-- **CLI Tool** — `nixclusterctl` for managing clusters
-- **Secrets Management** — sops-based encrypted secrets with age
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Nix flake](https://img.shields.io/badge/Nix-flake%20%2B%20flake--parts-5277C3?style=flat-square&logo=nixos&logoColor=white)](https://nixos.wiki/wiki/Flakes)
+[![Checks](https://img.shields.io/github/actions/workflow/status/kitsunoff/nixcluster/checks.yml?branch=master&label=checks&style=flat-square)](../../actions/workflows/checks.yml)
+[![Security](https://img.shields.io/github/actions/workflow/status/kitsunoff/nixcluster/security.yml?branch=master&label=security&style=flat-square)](../../actions/workflows/security.yml)
+[![Modules](https://img.shields.io/badge/cluster%20modules-k3s%20%C2%B7%20incus%20%C2%B7%20sops%20%C2%B7%20nebula-009688?style=flat-square)](#cluster-modules)
+
+</div>
+
+---
+
+> [!WARNING]
+> First-time provisioning runs `nixos-anywhere`, which **wipes the target disk**.
+> `converge` decides install-vs-switch by probing `/run/current-system` over SSH, so
+> a host you did not mean to include is a host you may destroy. Check every
+> `install.ip` and `install.disk` before the first run.
+
+> [!IMPORTANT]
+> Removing a member from the cluster definition now **removes it from the
+> cluster** — that is the point of two-way reconciliation. The guards are real
+> (an empty member set refuses to prune anything, and a removal that would break
+> quorum is refused), but a deliberate deletion is carried out.
+
+## Table of contents
+
+- [What you get](#what-you-get)
+- [Start from a scenario template](#start-from-a-scenario-template)
+- [How converge orders itself](#how-converge-orders-itself)
+- [Cluster modules](#cluster-modules)
+- [Writing a cluster by hand](#writing-a-cluster-by-hand)
+- [CLI](#cli)
+- [Checks](#checks)
+- [Architecture](#architecture)
+- [Known limitations](#known-limitations)
+- [License](#license)
+
+## What you get
+
+| Stage | What nixcluster does |
+| --- | --- |
+| **Describe** | One `nixcluster.<name>` definition: members, their roles, and which cluster modules to load. Everything that is not a nixcluster key is a NixOS patch for that member. |
+| **Derive** | `nixosConfigurations.<cluster>-<member>` per member and a per-cluster CLI app `cluster-<name>`, from that single definition. |
+| **Install** | `nixos-anywhere` for a host with no NixOS on it yet, decided by an SSH probe — so the step as a whole is idempotent even though installing is not. |
+| **Converge** | A dependency graph, not a fixed pipeline: secrets before members, non-first servers after the bootstrap, agents after **all** servers, post-ops after the members they need. |
+| **Join** | Module-specific runtime work that a NixOS switch cannot do: minting Incus join tokens, fetching a kubeconfig. Idempotent — an already-joined member is skipped and says so. |
+| **Prune** | Members that left the definition are drained, deregistered and removed from the cluster's own registry. Reported as `action: "removed"` in the result JSON. |
 
 ## Start from a scenario template
 
-The fastest way in is a template that already describes a working cluster. Each
-one ships a README naming exactly which values to change (addresses, disks, SSH
-keys).
+Each template is a complete, evaluating cluster with a README naming exactly which
+values to change.
 
 | Template | What you get |
 | --- | --- |
 | `k3s-single` | one k3s server — the minimal k3s scenario |
-| `k3s-ha` | three etcd servers plus two agents, with the full converge ordering contract |
-| `incus-cluster` | three Incus members; two carry nothing but an address |
+| `k3s-ha` | three etcd servers plus two agents, the full ordering contract |
+| `incus-cluster` | three Incus members, two of which carry nothing but an address |
 | `default` | the bare skeleton: flake-parts + import-tree, no scenario |
 
 ```bash
 mkdir my-cluster && cd my-cluster
 nix flake init --template github:kitsunoff/nixcluster#k3s-ha
 
-# Edit modules/nodes/*.nix (addresses) and modules/base.nix (disk, SSH key), then:
-nix run .#cluster-k3s-ha -- converge --dry-run
+# Edit modules/nodes/*.nix (addresses) and modules/base.nix (disk, SSH key):
+nix run .#cluster-k3s-ha -- converge --dry-run   # plan only, nothing touched
+nix run .#cluster-k3s-ha -- converge
 ```
 
-`converge` is a dependency graph, so `--dry-run` prints the real plan:
+## How converge orders itself
+
+Roles in the node files are the only input. Nothing in the cluster definition says
+"three servers":
 
 ```text
-member-server-1 ──┬──> member-server-2 ──┐
-                  ├──> member-server-3 ──┼──> member-agent-1
-                  │                      ├──> member-agent-2
-                  └──────────────────────┴──> k3s.bootstrap
-                                              k3s.kubeconfig
+$ nix eval .#clusterConfigurations.k3s-ha.convergeOrder
+["member-server-1","member-server-2","member-server-3","k3s.bootstrap","k3s.kubeconfig","member-agent-1","member-agent-2","k3s.prune"]
+
+$ nix eval .#clusterConfigurations.k3s-ha.config.converge.steps \
+    --apply 'steps: builtins.mapAttrs (_: s: s.deps) steps'
+  k3s.bootstrap          <- member-server-1, member-server-2, member-server-3
+  k3s.kubeconfig         <- member-server-1, member-server-2, member-server-3
+  k3s.prune              <- member-server-1, member-server-2, member-server-3, member-agent-1, member-agent-2, k3s.kubeconfig
+  member-agent-1         <- member-server-1, member-server-2, member-server-3
+  member-agent-2         <- member-server-1, member-server-2, member-server-3
+  member-server-1        <- (nothing)
+  member-server-2        <- member-server-1
+  member-server-3        <- member-server-1
 ```
 
-Every template is verified by evaluation on every change:
+Read that as: `server-1` bootstraps etcd, so `server-2` and `server-3` wait for it
+and **not** for each other; each agent waits for **all three** servers, because
+there is no control plane to join until they are up; the kubeconfig needs a server
+and does not care about agents; and pruning happens last, once the desired members
+have converged.
 
-```bash
-scripts/check-templates.sh            # all templates
-scripts/check-templates.sh k3s-ha     # one of them
-```
+A step whose dependency did not succeed is **skipped**, not run — a failed
+bootstrap does not drag the agents through a pointless join attempt.
 
-For each template the script locks a copy against this checkout and asserts the
-expected members, a NixOS configuration per member, the per-cluster CLI app, the
-resolved converge order, and the converge steps **with their dependencies** — so a
-template whose plan drifts from its documented contract fails loudly. It
-evaluates every member's `system.build.toplevel`, which catches option and type
-errors across the whole configuration, but builds nothing.
+`preSteps` / `postSteps` still exist as sugar over the same attrset, carrying the
+dependencies their names implied.
 
-## Quick Start
+## Cluster modules
 
-```bash
-# Clone and enter
-git clone https://github.com/kitsunoff/nixcluster
-cd nixcluster
+Nothing is auto-applied: a cluster imports what it wants.
 
-# Generate cluster secrets
-nix run .#nixclusterctl -- dev gen-secrets
+| Module | What it adds |
+| --- | --- |
+| `k3s` | k3s on every member, roles from `k3s.role`, the ordering contract above, kubeconfig fetch, node/manifest/helm commands, and a prune step |
+| `incus` | Incus on every member; with `incus.cluster.enable`, runtime join tokens for members that never set a per-member patch, plus a prune step |
+| `sops` | age-encrypted cluster secrets, generate-if-missing, delivered to hosts outside the Nix store |
+| `nebula` | a Nebula mesh with a per-cluster CA and per-member certificates |
+| `keepalived` | VRRP virtual addresses across members |
+| `disko` | declarative partitioning for the install step |
+| `cozystack` | Cozystack platform bootstrap on top of k3s |
+| `pxe` | a PXE server for provisioning members that cannot be reached over SSH yet |
 
-# Show cluster info
-nix run .#nixclusterctl -- dev
-
-# Bootstrap cluster (shows deploy order)
-nix run .#nixclusterctl -- dev bootstrap
-```
-
-## Cluster Configuration
+## Writing a cluster by hand
 
 ```nix
-clusterConfigurations.prod = mkCluster {
-  imports = [
-    clusterModules.k3s
-    clusterModules.sops
-    clusterModules.cozystack
-  ];
+nixcluster.prod =
+  { clusterModules, self, ... }:
+  {
+    imports = [ clusterModules.k3s clusterModules.sops ];
 
-  name = "prod";
+    k3s.enable = true;
+    sops.enable = true;
 
-  # Enable modules
-  k3s.enable = true;
-  sops.enable = true;
-  cozystack = {
-    enable = true;
-    publishing.host = "cozy.example.com";
+    # Members with no nixosConfiguration of their own inherit this — which is what
+    # lets a member be supplied as pure data (an address and nothing else).
+    defaultNixosConfiguration = self.nixosConfigurations.base;
+
+    members.node-1 = {
+      install.ip = "10.0.0.11";
+      install.disk = "/dev/vda";
+      k3s.role = "server";
+      networking.hostName = "prod-node-1";   # any NixOS option is a patch
+    };
   };
-
-  # Define members
-  members.node1 = {
-    nixosConfiguration = self.nixosConfigurations.base;
-    install.ip = "192.168.1.10";
-    k3s.role = "server";
-  };
-
-  members.node2 = {
-    nixosConfiguration = self.nixosConfigurations.base;
-    install.ip = "192.168.1.11";
-    k3s.role = "server";
-  };
-
-  members.worker1 = {
-    nixosConfiguration = self.nixosConfigurations.base;
-    install.ip = "192.168.1.20";
-    k3s.role = "agent";
-  };
-};
 ```
 
-## CLI Commands
+## CLI
 
 ```bash
-nix run .#nixclusterctl -- <cluster> <command> [args]
-
-# Available commands:
-#   apply              - Apply config to member
-#   bootstrap          - Bootstrap k3s cluster
-#   gen-secrets        - Generate cluster secrets
-#   edit-secrets       - Edit cluster secrets
-#   show-secrets       - Show decrypted secrets
-#   kubeconfig         - Fetch kubeconfig
-#   cozystack-bootstrap - Bootstrap cozystack
-#   cozystack-status   - Show cozystack status
+nix run .#cluster-prod -- --help
+nix run .#cluster-prod -- converge [--dry-run] [--json] [--age-key-file path]
+nix run .#cluster-prod -- apply node-1          # switch one member
+nix run .#cluster-prod -- install node-1        # first-time provisioning
+nix run .#cluster-prod -- gen-config 10.0.0.12  # SSH-discover a node, emit a member file
+nix run .#cluster-prod -- k3s nodes             # module command groups
 ```
+
+`converge` writes human output to stderr and exactly one machine-readable line to
+stdout, so a consumer gets a single marker to grep:
+
+```text
+::nixcluster:result:: {"cluster":"prod","result":"success","members":[
+  {"name":"node-1","ip":"10.0.0.11","action":"switch","status":"Applied","durationSeconds":47},
+  {"name":"old-node","ip":"","action":"removed","status":"Applied","message":"removed from the k3s registry (unreachable)"}],
+  "steps":[{"name":"sops.gen","phase":"pre","status":"ok"},{"name":"k3s.prune","phase":"post","status":"ok"}]}
+```
+
+## Checks
+
+Both are evaluation-only and run in CI on every push and pull request.
+
+```text
+$ scripts/check-templates.sh
+24 check(s) passed, 0 failed
+
+$ scripts/check-prune.sh
+38 check(s) passed, 0 failed
+```
+
+`check-templates.sh` locks every registered template against the checkout and
+asserts the expected members, a NixOS configuration per member, the per-cluster CLI
+app, the resolved converge order, and the converge steps **with their
+dependencies** — so a template whose plan drifts from its documented contract
+fails loudly. It also evaluates every member's `system.build.toplevel`, which
+catches option and type errors across the whole configuration, while building
+nothing.
+
+`check-prune.sh` covers the only part of converge that deletes things: the engine's
+branches against an injected registry (no-op, one stale member, unreachable host →
+force path, empty desired set → loud refusal with nothing removed, quorum-breaking
+removal → refused) and the real k3s step against stubbed `kubectl` and `ssh`.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Cluster Configuration                     │
-│                                                              │
-│  k3s.enable = true;                                         │
-│  cozystack.enable = true;                                   │
-│                                                              │
-│  members.node1 = {                                          │
-│    nixosConfiguration = base;                               │
-│    install.ip = "192.168.1.10";                            │
-│    k3s.role = "server";         ← NixOS option             │
-│  };                                                          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     Cluster Modules                          │
-│                                                              │
-│  cluster-modules/k3s.nix      → modules/nixos/nixcluster-k3s.nix │
-│  cluster-modules/sops.nix                                    │
-│  cluster-modules/cozystack.nix                               │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   NixOS Configurations                       │
-│                                                              │
-│  nixosConfigurations.node1    (server, --cluster-init)      │
-│  nixosConfigurations.node2    (server)                       │
-│  nixosConfigurations.worker1  (agent)                        │
-└─────────────────────────────────────────────────────────────┘
+```text
+nixcluster.<name>                     one definition (merged across ./modules by import-tree)
+  │
+  ├─ core.nix                         members, converge DAG, CLI plumbing
+  ├─ clusterModules.*                 explicitly imported; each contributes
+  │                                   NixOS modules, CLI commands, converge steps
+  ▼
+clusterConfigurations.<name>
+  ├─ nixosConfigurations.<name>-<member>     one per member
+  ├─ convergeOrder                           resolved topological plan
+  └─ cli  →  apps.<system>.cluster-<name>    the per-cluster CLI
 ```
 
-## Cluster Modules
+Every unit of converge work — a module step *and* each member's install-or-switch —
+is a node in `converge.steps`. `lib/convergePlan.nix` topologically sorts them and
+fails evaluation on an unknown dependency, a cycle, or a step that is neither a
+`run` nor a `member`. `lib/prune.nix` holds the registry-diff engine all pruning
+modules share, so the dangerous logic exists exactly once.
 
-### k3s
+## Known limitations
 
-Configures k3s server/agent based on `k3s.role`:
-
-```nix
-k3s.enable = true;
-
-members.node1.k3s.role = "server";  # First server gets --cluster-init
-members.node2.k3s.role = "server";
-members.worker1.k3s.role = "agent";
-```
-
-### sops
-
-Manages encrypted secrets with age:
-
-```nix
-sops.enable = true;
-sops.secretsDir = "secrets";  # default
-
-# Generated files:
-# secrets/<cluster>.yaml      - encrypted secrets
-# secrets/<cluster>.age.key   - age private key (gitignored)
-# secrets/<cluster>.age.pub   - age public key
-# secrets/<cluster>_ssh       - SSH private key (gitignored)
-# secrets/<cluster>_ssh.pub   - SSH public key
-```
-
-### cozystack
-
-Deploys [Cozystack](https://cozystack.io) platform:
-
-```nix
-cozystack = {
-  enable = true;
-  publishing.host = "cozy.example.com";
-  variant = "isp-full-generic";  # default
-  networking = {
-    podCIDR = "10.42.0.0/16";
-    serviceCIDR = "10.43.0.0/16";
-  };
-};
-```
-
-Automatically adds required k3s flags, sysctl settings, packages.
-
-## Writing Cluster Modules
-
-See [docs/cluster-modules.md](docs/cluster-modules.md) for guidelines.
-
-Key concepts:
-
-1. **Cluster module** defines cluster-level options and adds NixOS modules
-2. **NixOS module** receives `nixcluster` context with cluster/member info
-3. **Member options** are NixOS options set as patches in cluster config
-
-```nix
-# cluster-modules/mymodule.nix
-{ lib, config, ... }:
-{
-  options.mymodule.enable = lib.mkEnableOption "My module";
-
-  config = lib.mkIf config.mymodule.enable {
-    _generatedNixosModules = lib.genAttrs (lib.attrNames config.members) (_:
-      [ ../modules/nixos/mymodule.nix ]
-    );
-  };
-}
-```
-
-```nix
-# modules/nixos/mymodule.nix
-{ config, lib, nixcluster, ... }:
-let
-  cluster = nixcluster.cluster;
-  member = nixcluster.member;
-  memberName = nixcluster.memberName;
-in
-{
-  # NixOS configuration based on cluster context
-}
-```
-
-## Secrets Workflow
-
-```bash
-# Generate secrets (age keypair, SSH keypair, k3s tokens)
-nix run .#nixclusterctl -- prod gen-secrets
-
-# Edit encrypted secrets
-nix run .#nixclusterctl -- prod edit-secrets
-
-# Show decrypted secrets
-nix run .#nixclusterctl -- prod show-secrets
-```
-
-## Deployment Workflow
-
-```bash
-# 1. Generate secrets
-nix run .#nixclusterctl -- prod gen-secrets
-
-# 2. Deploy nodes (first server first)
-nix run .#nixclusterctl -- prod apply node1
-nix run .#nixclusterctl -- prod apply node2
-nix run .#nixclusterctl -- prod apply worker1
-
-# 3. Fetch kubeconfig
-nix run .#nixclusterctl -- prod kubeconfig fetch
-export KUBECONFIG=kubeconfig/prod.yaml
-
-# 4. Bootstrap cozystack (if enabled)
-nix run .#nixclusterctl -- prod cozystack-bootstrap
-
-# 5. Check status
-kubectl get nodes
-nix run .#nixclusterctl -- prod cozystack-status
-```
+- **Pruning has never run against a live cluster.** The engine and the k3s step are
+  covered by stubbed tests; the Incus path is verified only by evaluation.
+- **`nebula` and `keepalived` do not prune.** Nebula revocation is only enforced
+  through `pki.blocklist`, which is deliberately not distributed by lighthouses, so
+  it needs a persisted blocklist wired through the NixOS module.
+- **Per-member converge status is coarse.** The result JSON reports one action per
+  member, not a step-by-step trace.
+- **`converge` builds where it runs.** There is no `--build-host`, so driving it
+  from a machine that cannot build the members' system needs a configured remote
+  builder.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
