@@ -186,6 +186,14 @@ in
             run = k3sCommands.kubeconfig.builder;
           };
         }
+        # The first server leads: it depends on the preparation steps only. This
+        # MUST be stated. Core's default makes each member wait for the previous
+        # one in name order, which for a cluster whose agents sort before its
+        # servers would make the bootstrap wait for an agent that is itself
+        # waiting for the bootstrap — a cycle.
+        // {
+          ${memberStepName firstServer}.deps = lib.attrNames config.converge.preSteps;
+        }
         // lib.listToAttrs (map
           (server: lib.nameValuePair (memberStepName server) {
             deps = [ (memberStepName firstServer) ];
