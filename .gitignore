@@ -8,3 +8,9 @@ tests/
 
 # Local working session notes (verification results, not for publishing)
 notes/
+
+# Build junk that must never come back
+err.log
+result
+result-*
+.DS_Store

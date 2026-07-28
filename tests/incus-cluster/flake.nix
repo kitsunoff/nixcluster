@@ -58,14 +58,14 @@
           defaultNixosConfiguration = self.nixosConfigurations.base;
 
           members.node-a = {
-            install.ip = "192.168.105.11";
+            install.ip = "10.0.0.11";
             incus.enable = true;
           };
 
           # Data-only joiner: no `incus.enable` — proves clustering applies to
           # NIO-injected members that never set the per-member patch.
           members.node-b = {
-            install.ip = "192.168.105.12";
+            install.ip = "10.0.0.12";
           };
         };
     };
