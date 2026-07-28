@@ -4,6 +4,7 @@
 rec {
   mkCluster = import ./mkCluster.nix { inherit lib inputs; };
   convergePlan = import ./convergePlan.nix { inherit lib; };
+  mkPruneStep = import ./prune.nix { inherit lib; };
   mkClusterCli = import ./mkClusterCli.nix { inherit lib; };
   mkClusterOutputs = import ./clusterOutputs.nix { inherit lib; };
   mkNixclusterctl = import ./mkNixclusterctl.nix { inherit lib; };

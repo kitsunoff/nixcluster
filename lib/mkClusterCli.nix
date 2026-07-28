@@ -350,6 +350,35 @@ let
               EF_ARGS+=(--extra-files "$EXTRA_FILES")
             fi
 
+            # A step may report members it REMOVED, by printing
+            #   ::nixcluster:removed:: {"name":…,"action":"removed",…}
+            # on stdout. Those entries join the members array, so a consumer sees a
+            # departure the same way it sees an install or a switch — membership is
+            # reconciled in both directions and the result says so.
+            collect_removals() { # step-output-file
+              local line payload
+              while IFS= read -r line; do
+                case "$line" in
+                  '::nixcluster:removed:: '*)
+                    payload="''${line#'::nixcluster:removed:: '}"
+                    if jq -e . >/dev/null 2>&1 <<<"$payload"; then
+                      MEMBERS_JSON=$(jq -c --argjson entry "$payload" \
+                        '. += [{
+                           name: $entry.name,
+                           ip: ($entry.ip // ""),
+                           action: ($entry.action // "removed"),
+                           status: ($entry.status // "Applied"),
+                           message: ($entry.message // ""),
+                           durationSeconds: ($entry.durationSeconds // 0)
+                         }]' <<<"$MEMBERS_JSON")
+                    else
+                      log "  ignoring malformed ::nixcluster:removed:: payload"
+                    fi
+                    ;;
+                esac
+              done < "$1"
+            }
+
             run_step() { # name phase exe [deps...]
               local name="$1" phase="$2" exe="$3"
               shift 3
@@ -367,7 +396,16 @@ let
                 return 0
               fi
               log "=== step [$phase] $name ==="
-              if "$exe"; then
+              # Capture stdout so removal reports can be folded into the result,
+              # while still showing it to a human (on stderr, like everything else).
+              local out rc=0
+              out="$(mktemp)"
+              if "$exe" > "$out" 2>&1; then rc=0; else rc=$?; fi
+              cat "$out" >&2
+              collect_removals "$out"
+              rm -f "$out"
+
+              if [[ "$rc" -eq 0 ]]; then
                 add_step "$name" "$phase" ok ""
                 STEP_STATUS[$name]=ok
               else
