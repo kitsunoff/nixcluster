@@ -76,6 +76,89 @@ let
 
   allMembersList = lib.concatStringsSep " " incusMemberNames;
 
+  # --- pruning departed members -----------------------------------------------
+  # Shared registry-diff engine; the dangerous logic lives in one place.
+  mkPruneStep = import ../lib/prune.nix { inherit lib; };
+
+  # Registry names of the desired members, via core's canonical mapping.
+  desiredIncusMembers = map (member: config.memberRegistryNames.${member}) incusMemberNames;
+
+  # Incus keeps its database in a Raft cluster, so a majority of members must
+  # survive. Below that the database has no leader and the cluster is unusable.
+  incusQuorumMinimum =
+    if incusMemberNames == [] then 0 else (builtins.length incusMemberNames) / 2 + 1;
+
+  # All registry operations run ON the bootstrap, which is the member that still
+  # knows the cluster. The departing host is never contacted directly — Incus
+  # already reports whether it is ONLINE, which is a better reachability signal
+  # than an SSH probe from here (and works when the machine is simply gone).
+  incusPrunePrelude = ''
+    BOOTSTRAP_IP="${toString bootstrapIp}"
+    if [[ -z "$BOOTSTRAP_IP" ]]; then
+      log "no bootstrap member with an install.ip; nothing to reconcile against"
+      exit 0
+    fi
+
+    # Runs `incus <args...>` on the bootstrap. The arguments reach the remote shell
+    # as POSITIONALS via stdin, so a member name is never spliced into a command
+    # string that the local shell expands.
+    incus_on_bootstrap() {
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 -o BatchMode=yes "root@$BOOTSTRAP_IP" \
+        'sh -s' -- "$@" <<'REMOTE'
+    incus "$@"
+    REMOTE
+    }
+
+    cluster_json() {
+      incus_on_bootstrap cluster list --format json 2>/dev/null || echo '[]'
+    }
+
+    member_state() { # member -> ONLINE / OFFLINE / EVACUATED / ""
+      cluster_json | jq --raw-output --arg name "$1" \
+        'map(select(.server_name == $name)) | .[0].status // ""' 2>/dev/null || true
+    }
+
+    has_role() { # member role -> true / false
+      cluster_json | jq --raw-output --arg name "$1" --arg role "$2" \
+        'map(select(.server_name == $name)) | .[0].roles // [] | index($role) != null' 2>/dev/null || true
+    }
+  '';
+
+  # Incus reports OFFLINE for a member that stopped answering heartbeats — the
+  # authoritative answer to "can we do this gracefully?".
+  incusPruneProbe = ''
+    [[ "$(member_state "$1")" == "ONLINE" ]]
+  '';
+
+  # Graceful: evacuate the member's instances (bounded — a stuck instance must not
+  # hold the run) and then remove it. Force only when the member is OFFLINE.
+  #
+  # `--force` is not a convenience: Incus documents that it leaves the removed
+  # member's own database inconsistent, so that host cannot be re-initialised and
+  # must be reinstalled. That is exactly right for the case it is used in — the
+  # machine is already gone — and wrong for a live one, which is why it is reached
+  # only through the OFFLINE branch.
+  incusPruneRemove = ''
+    local member="$1" reachable="$2"
+
+    if [[ "$(has_role "$member" database-leader)" == "true" ]]; then
+      log "$member currently holds database-leader; the survivors will elect a new"
+      log "  leader once it leaves (quorum is checked before we get here)"
+    fi
+
+    if [[ "$reachable" == "reachable" ]]; then
+      if ! timeout ${toString cfg.cluster.pruneEvacuateTimeoutSeconds} \
+        incus_on_bootstrap cluster evacuate --force "$member"; then
+        log "evacuation of $member did not finish cleanly; removing anyway"
+      fi
+      incus_on_bootstrap cluster remove "$member"
+    else
+      # The member is OFFLINE: there is nothing to evacuate to or from.
+      incus_on_bootstrap cluster remove --force "$member"
+    fi
+  '';
+
   # CLI commands
   incusCommands = {
     status = {
@@ -355,6 +438,16 @@ in
         description = "Port for the Incus HTTPS API and cluster member addresses.";
       };
 
+      pruneEvacuateTimeoutSeconds = lib.mkOption {
+        type = lib.types.int;
+        default = 300;
+        description = ''
+          How long to let `incus cluster evacuate` run before removing a departing
+          member anyway. Bounded on purpose: an instance that will not migrate must
+          not hold the whole converge run open.
+        '';
+      };
+
       storagePool = lib.mkOption {
         type = lib.types.str;
         default = "default";
@@ -431,6 +524,26 @@ in
           run = incusCommands.init.builder;
         };
       })
+      # Membership is reconciled in BOTH directions: remove members that are in
+      # the registry but no longer in the cluster definition. Runs after the join
+      # and reconcile steps, so the desired members are settled first.
+      (lib.mkIf (clusterEnabled && incusMemberNames != []) {
+        "incus.prune" = {
+          description = "Remove departed members from the Incus cluster";
+          priority = 75;
+          run = { pkgs, ... }: mkPruneStep {
+            inherit pkgs;
+            subject = "incus";
+            runtimeInputs = with pkgs; [ openssh jq ];
+            desired = desiredIncusMembers;
+            quorumMinimum = incusQuorumMinimum;
+            prelude = incusPrunePrelude;
+            probeHost = incusPruneProbe;
+            listRegistry = ''cluster_json | jq --raw-output '.[].server_name' '';
+            removeEntry = incusPruneRemove;
+          };
+        };
+      })
     ];
 
     # The Incus ordering contract: a joiner has no cluster to join until the
@@ -444,6 +557,13 @@ in
       # would wait for a joiner that is waiting for the bootstrap.
       {
         "member-${resolvedBootstrap}".deps = lib.attrNames config.converge.preSteps;
+
+        # Never take a member away before the desired ones have joined and
+        # reconciled: the prune diffs against a settled registry, not a
+        # half-converged one.
+        "incus.prune".deps =
+          (map (member: "member-${member}") (lib.attrNames config.members))
+          ++ [ "incus.cluster-join" "incus.reconcile" ];
       }
       // lib.listToAttrs (map
         (joiner: lib.nameValuePair "member-${joiner}" {

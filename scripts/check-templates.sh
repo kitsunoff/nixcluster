@@ -86,15 +86,15 @@ declare -A EXPECT_MEMBERS=(
 )
 
 declare -A EXPECT_DEPS=(
-  [default]="member-node1:- k3s.bootstrap:member-node1 k3s.kubeconfig:member-node1"
-  [k3s-single]="member-server-1:- k3s.bootstrap:member-server-1 k3s.kubeconfig:member-server-1"
+  [default]="member-node1:- k3s.bootstrap:member-node1 k3s.kubeconfig:member-node1 k3s.prune:k3s.kubeconfig,member-node1"
+  [k3s-single]="member-server-1:- k3s.bootstrap:member-server-1 k3s.kubeconfig:member-server-1 k3s.prune:k3s.kubeconfig,member-server-1"
   # The HA contract: servers 2 and 3 wait for server 1 (etcd bootstrap) and not
   # for each other; every agent waits for ALL servers; the kubeconfig needs only
   # the servers.
-  [k3s-ha]="member-server-1:- member-server-2:member-server-1 member-server-3:member-server-1 member-agent-1:member-server-1,member-server-2,member-server-3 member-agent-2:member-server-1,member-server-2,member-server-3 k3s.bootstrap:member-server-1,member-server-2,member-server-3 k3s.kubeconfig:member-server-1,member-server-2,member-server-3"
+  [k3s-ha]="member-server-1:- member-server-2:member-server-1 member-server-3:member-server-1 member-agent-1:member-server-1,member-server-2,member-server-3 member-agent-2:member-server-1,member-server-2,member-server-3 k3s.bootstrap:member-server-1,member-server-2,member-server-3 k3s.kubeconfig:member-server-1,member-server-2,member-server-3 k3s.prune:k3s.kubeconfig,member-agent-1,member-agent-2,member-server-1,member-server-2,member-server-3"
   # The Incus contract: joiners wait for the bootstrap and not for each other;
   # the join/reconcile steps wait for every member.
-  [incus-cluster]="member-node-1:- member-node-2:member-node-1 member-node-3:member-node-1 incus.cluster-join:member-node-1,member-node-2,member-node-3 incus.reconcile:member-node-1,member-node-2,member-node-3"
+  [incus-cluster]="member-node-1:- member-node-2:member-node-1 member-node-3:member-node-1 incus.cluster-join:member-node-1,member-node-2,member-node-3 incus.reconcile:member-node-1,member-node-2,member-node-3 incus.prune:incus.cluster-join,incus.reconcile,member-node-1,member-node-2,member-node-3"
 )
 
 # check_template <name>
