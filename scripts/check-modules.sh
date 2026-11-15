@@ -71,5 +71,23 @@ expect_eq "a secret declared by a module resolves to that file" "true" \
   "$(member_eval lab-node-1 sops.secrets \
     's: builtins.match "/nix/store/[^/]+/secrets/lab[.]yaml" (toString s."k3s/token".sopsFile) != null')"
 
+printf '\n==> keepalived and the firewall\n'
+
+# Incus switches the firewall to nftables, where iptables extraCommands are an
+# evaluation error. VRRP must be allowed the nftables way there, and the
+# iptables way everywhere else.
+expect_eq "keepalived + Incus: the member configuration evaluates" "true" \
+  "$(member_eval lab-node-1 system.build.toplevel.drvPath 'p: builtins.isString p')"
+expect_eq "keepalived + Incus: the firewall is nftables" "true" \
+  "$(member_eval lab-node-1 networking.nftables.enable)"
+expect_eq "keepalived + Incus: VRRP is allowed by an nftables rule" "true" \
+  "$(member_eval lab-node-1 networking.firewall.extraInputRules 's: builtins.match ".*ip protocol vrrp accept.*" s != null')"
+expect_eq "keepalived + Incus: no iptables command is left" '""' \
+  "$(member_eval lab-node-1 networking.firewall.extraCommands)"
+expect_eq "keepalived alone: the iptables rule stays" "true" \
+  "$(member_eval plain-node-1 networking.firewall.extraCommands 's: builtins.match ".*iptables -I INPUT -p vrrp -j ACCEPT.*" s != null')"
+expect_eq "keepalived alone: the member configuration evaluates" "true" \
+  "$(member_eval plain-node-1 system.build.toplevel.drvPath 'p: builtins.isString p')"
+
 printf '\n%d check(s) passed, %d failed\n' "$checks" "$failures"
 [[ "$failures" -eq 0 ]]
