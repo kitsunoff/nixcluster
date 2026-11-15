@@ -7,6 +7,7 @@ let
   mkClusterCli = import ./mkClusterCli.nix { inherit lib; };
   resolveMemberBase = import ./resolveMemberBase.nix { inherit lib; };
   stepPlan = import ./stepPlan.nix { inherit lib; };
+  optionsOnly = import ./optionsOnly.nix { inherit lib; };
 
   # Keys that are nixcluster-specific, not NixOS patches.
   nixclusterKeys = [ "nixosConfiguration" "install" ];
@@ -44,14 +45,23 @@ let
     };
 
   # What `teardown` switches a member back to: its base configuration (the
-  # member's own, else the cluster default) WITHOUT the member's patches and
-  # without the cluster modules — only the few modules that describe the machine
-  # itself (`_teardownNixosModules`, e.g. disko's disk layout) are kept, so the
-  # host still boots and still answers SSH for the next converge.
+  # member's own, else the cluster default) plus the member's own patches, but
+  # without what the cluster modules generate. The patches stay because they
+  # describe the machine (host name, addresses): without them the host could
+  # come back with no network, and the next converge could not reach it.
+  #
+  # Patches may still set cluster-module options (`k3s.role`), so the generated
+  # modules are loaded options-only: their options exist, their config does not.
+  # Only `_teardownNixosModules` add config back — what describes the machine
+  # itself (disko's disk layout) or what teardown has to force (no secrets).
   mkTeardownNixosConfig = memberName: member:
     (resolveMemberBase cfg memberName member).extendModules {
-      modules = [ (clusterContext memberName member) ]
-        ++ (cfg._teardownNixosModules.${memberName} or []);
+      modules = [
+        (removeAttrs member nixclusterKeys)
+        (clusterContext memberName member)
+      ]
+      ++ map optionsOnly (cfg._generatedNixosModules.${memberName} or [])
+      ++ (cfg._teardownNixosModules.${memberName} or []);
     };
 in
 {

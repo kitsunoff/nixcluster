@@ -91,6 +91,17 @@ in
       (name: member: [ (mkSopsNixosModule name member) ])
       config.members;
 
+    # The teardown base decrypts nothing: sops.cleanup removed the secrets, and
+    # the switch back must not bring them again — not even the ones the user's
+    # own configuration or patches declare. Without the cluster's age key
+    # setting they could not be decrypted anyway.
+    _teardownNixosModules = lib.genAttrs (lib.attrNames config.members) (_: [
+      ({ lib, ... }: {
+        sops.secrets = lib.mkForce { };
+        sops.templates = lib.mkForce { };
+      })
+    ]);
+
     teardown.steps = teardownLib.mkModuleSteps {
       cluster = config;
       module = "sops";

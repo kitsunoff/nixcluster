@@ -138,8 +138,11 @@ The plan is `converge` in reverse, built from the same dependency graph, and
    `incus`), cleanup starts only after every member of that module has left.
 4. **Switch back.** `member-<member>`: the member is switched to its base NixOS
    configuration — its own `nixosConfiguration` or the cluster's
-   `defaultNixosConfiguration`, without member patches and without cluster
-   modules. Only the disk layout from `disko` is kept. The base is published as
+   `defaultNixosConfiguration` plus its member patches (host name, network),
+   without what the cluster modules generate. Patches may still set
+   cluster-module options such as `k3s.role`: those modules are loaded
+   options-only. The disk layout from `disko` is kept, and no sops secret is
+   decrypted. The base is published as
    `clusterConfigurations.<name>.teardownNixosConfigurations.<member>`.
 
 ```text
@@ -300,9 +303,9 @@ gives every module the same four teardown phases for the same reason.
   covered by evaluation and by stubbed tests only.
 - **Teardown fully resets only the default `dir` Incus storage pool.** Pools on
   zfs, lvm or btrfs with a block-device source are not wiped.
-- **Teardown drops member patches.** Anything a member needs to stay reachable,
-  such as a static network configuration, must be in its base configuration,
-  not in a member patch.
+- **Teardown keeps member patches.** A patch that configures a service
+  directly (for example `services.k3s.*` instead of the module's `k3s.*`
+  options) stays active after teardown.
 
 ## License
 
