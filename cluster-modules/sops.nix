@@ -27,7 +27,9 @@ let
   mkSopsNixosModule = memberName: member:
     { config, pkgs, ... }: {
       sops = {
-        defaultSopsFile = secretsFile;
+        # sops-nix wants a path it can read at evaluation; the relative
+        # `secretsFile` only makes sense to the CLI running in the flake root.
+        defaultSopsFile = lib.mkIf (cfg.secretsFile != null) cfg.secretsFile;
         age.keyFile = cfg.ageKeyFileOnHost;
         age.generateKey = false;
       };
@@ -57,6 +59,23 @@ in
       type = lib.types.str;
       default = "secrets";
       description = "Directory for SOPS secrets files (relative to project root)";
+    };
+
+    secretsFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default =
+        if config._flakeRoot != null
+        then "${config._flakeRoot}/${secretsFile}"
+        else null;
+      defaultText = lib.literalExpression ''"''${self}/''${sops.secretsDir}/<cluster>.yaml"'';
+      description = ''
+        The encrypted secrets file the members decrypt (sops-nix
+        `defaultSopsFile`). Defaults to `<secretsDir>/<cluster>.yaml` inside
+        the flake that defines the cluster, which is where `sops gen` writes
+        it; the file must be tracked by git to be part of the flake. Set it
+        explicitly when the cluster comes from `lib.mkCluster`, which does not
+        know the calling flake.
+      '';
     };
 
     ageKeyFileOnHost = lib.mkOption {

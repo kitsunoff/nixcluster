@@ -80,3 +80,25 @@ jobs:
       # dry run, unreachable and failing members — against stubbed ssh/nix.
       - name: Check teardown logic
         run: ./scripts/check-teardown.sh
+
+  modules:
+    name: Module combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      # The templates load one or two modules each; bugs live where modules
+      # meet. A fixture flake combines them the way a real cluster does and the
+      # NixOS side is checked by evaluation only.
+      - name: Check module combinations
+        run: ./scripts/check-modules.sh

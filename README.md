@@ -172,7 +172,7 @@ Nothing is auto-applied: a cluster imports what it wants.
 | --- | --- |
 | `k3s` | k3s on every member, roles from `k3s.role`, the ordering contract above, kubeconfig fetch, node/manifest/helm commands, and a prune step |
 | `incus` | Incus on every member; with `incus.cluster.enable`, runtime join tokens for members that never set a per-member patch, plus a prune step |
-| `sops` | age-encrypted cluster secrets, generate-if-missing, delivered to hosts outside the Nix store |
+| `sops` | age-encrypted cluster secrets, generate-if-missing, delivered to hosts outside the Nix store. Members decrypt `secrets/<cluster>.yaml` from the flake (`sops.secretsFile`; commit the file so the flake contains it) |
 | `nebula` | a Nebula mesh with a per-cluster CA and per-member certificates |
 | `keepalived` | VRRP virtual addresses across members |
 | `disko` | declarative partitioning for the install step |
@@ -227,7 +227,7 @@ stdout, so a consumer gets a single marker to grep:
 
 ## Checks
 
-All three run in CI on every push and pull request. None of them builds a NixOS
+All of them run in CI on every push and pull request. None of them builds a NixOS
 system or touches a host.
 
 ```text
@@ -239,6 +239,9 @@ $ scripts/check-prune.sh
 
 $ scripts/check-teardown.sh
 88 check(s) passed, 0 failed
+
+$ scripts/check-modules.sh
+2 check(s) passed, 0 failed
 ```
 
 `check-templates.sh` locks every registered template against the checkout and
@@ -261,6 +264,10 @@ surviving the switch back, and the real `teardown` command against stubbed
 `ssh`, `kubectl` and `nix` — the `yes` prompt and every refusal, `--dry-run`,
 `--auto-approve`, an unreachable member, a member that fails to switch, and the
 result JSON.
+
+`check-modules.sh` evaluates the NixOS side of the modules in combination: a
+fixture flake (`scripts/fixtures/modules`) loads them the way a real cluster
+does, and the script asserts what each member's configuration ends up with.
 
 ## Architecture
 
