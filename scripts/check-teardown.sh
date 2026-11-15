@@ -9,7 +9,8 @@
 #            (k3s, incus, keepalived, nebula, sops): its exact order, and the
 #            round-trip property "teardown is converge in reverse"
 #            (scripts/teardown-roundtrip.jq). Every template gets the same
-#            round-trip check in scripts/check-templates.sh.
+#            round-trip check in scripts/check-templates.sh. Then what a member
+#            is switched back to: its disk layout kept, the cluster dropped.
 #
 #   Part B — the REAL teardown command of that cluster, run with stub `ssh`,
 #            `scp`, `kubectl` and `nix` (scripts/teardown-stubs.nix): the prompt
@@ -173,6 +174,24 @@ member-node-4 member-node-3 member-node-2 member-node-1"
     "incus.cleanup-node-2 k3s.cleanup-node-2 keepalived.cleanup-node-2 nebula.cleanup-node-2 sops.cleanup-node-2" \
     "$("${JQ[@]}" --raw-output '.teardown.deps["member-node-2"] | sort | join(" ")' "$PLAN")"
 fi
+
+printf '\n==> Part A: what a member is switched back to\n'
+
+# The flake's own `dev` cluster loads disko and k3s on a base that includes the
+# disko NixOS module. Its base configuration must keep the disk layout (the
+# host has to boot from the same disk afterwards) and drop the cluster.
+base_eval() {
+  "${NIX[@]}" eval --json "path:$REPO_ROOT#clusterConfigurations.dev.$1" ${2:+--apply "$2"} 2>&1 ||
+    echo "<eval failed>"
+}
+DISKS='d: builtins.mapAttrs (_: v: v.device) d'
+expect_eq "the disk layout survives teardown" \
+  "$(base_eval 'nixosConfigurations.node1.config.disko.devices.disk' "$DISKS")" \
+  "$(base_eval 'teardownNixosConfigurations.node1.config.disko.devices.disk' "$DISKS")"
+expect_eq "the base still has a disk to boot from" '{"main":"/dev/sda"}' \
+  "$(base_eval 'teardownNixosConfigurations.node1.config.disko.devices.disk' "$DISKS")"
+expect_eq "the cluster is gone from the base" "false" \
+  "$(base_eval 'teardownNixosConfigurations.node1.config.services.k3s.enable')"
 
 # ---------------------------------------------------------------------------
 # Part B — the real command against stubs.
