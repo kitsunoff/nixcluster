@@ -89,5 +89,19 @@ expect_eq "keepalived alone: the iptables rule stays" "true" \
 expect_eq "keepalived alone: the member configuration evaluates" "true" \
   "$(member_eval plain-node-1 system.build.toplevel.drvPath 'p: builtins.isString p')"
 
+printf '\n==> ports between members\n'
+
+# Members talk to each other on these; a closed port shows up only at runtime
+# (pods on different nodes cannot reach each other, `incus cluster add` hangs).
+has_port() { printf 'p: builtins.elem %s p' "$1"; }
+expect_eq "k3s opens flannel VXLAN (UDP 8472)" "true" \
+  "$(member_eval lab-node-1 networking.firewall.allowedUDPPorts "$(has_port 8472)")"
+expect_eq "k3s opens the API (TCP 6443)" "true" \
+  "$(member_eval lab-node-1 networking.firewall.allowedTCPPorts "$(has_port 6443)")"
+expect_eq "a clustered Incus opens its cluster API (TCP 8443)" "true" \
+  "$(member_eval lab-node-1 networking.firewall.allowedTCPPorts "$(has_port 8443)")"
+expect_eq "a host without Incus or k3s opens neither" "false false" \
+  "$(member_eval plain-node-1 networking.firewall.allowedTCPPorts "$(has_port 8443)") $(member_eval plain-node-1 networking.firewall.allowedUDPPorts "$(has_port 8472)")"
+
 printf '\n%d check(s) passed, %d failed\n' "$checks" "$failures"
 [[ "$failures" -eq 0 ]]

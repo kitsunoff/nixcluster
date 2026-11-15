@@ -260,6 +260,9 @@ in
 
     networking.firewall.trustedInterfaces = [ cfg.bridgeName ];
 
+    # Cluster members reach each other on the HTTPS API (joining, database).
+    networking.firewall.allowedTCPPorts = lib.mkIf isClustered [ clusterCfg.httpsPort ];
+
     # Reconcile declarative instances bound to this node (Part A). Only runs
     # when this node actually hosts at least one declared instance.
     systemd.services.incus-instances-reconcile = lib.mkIf (thisInstances != {}) {
