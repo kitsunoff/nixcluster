@@ -281,6 +281,8 @@ expect_eq "every member is planned for destruction, not destroyed" \
 expect_eq "every step is skipped as dry-run" "true" \
   "$(jq_result '(.steps | length) > 0 and (.steps | all(.status == "skipped" and .message == "dry-run"))')"
 expect_eq "a plan is a success, not a partial run" "success" "$(jq_result '.result')"
+expect_eq "the plan reports the member steps too" "member-node-1 member-node-2 member-node-3 member-node-4" \
+  "$(jq_result '[.steps[] | select(.phase == "member") | .name] | sort | join(" ")')"
 
 printf '\n  "yes" proceeds\n'
 run_teardown $'yes\n'
@@ -325,9 +327,11 @@ expect_eq "cluster name" "lab" "$(jq_result '.cluster')"
 expect_eq "member keys" '["action","durationSeconds","ip","message","name","status"]' \
   "$(jq_result '[.members[] | keys] | unique | .[0]')"
 expect_eq "step keys" '["message","name","phase","status"]' "$(jq_result '[.steps[] | keys] | unique | .[0]')"
-expect_eq "steps are reported in plan order" \
-  "$(printf '%s' "${EXPECTED_ORDER:-}" | tr '\n' ' ' | sed 's/ member-node-[0-9]//g')" \
+expect_eq "steps are reported in plan order, member steps included" \
+  "$(printf '%s' "${EXPECTED_ORDER:-}" | tr '\n' ' ')" \
   "$(jq_result '.steps | map(.name) | join(" ")')"
+expect_eq "a member step carries the member phase" "member:ok" \
+  "$(jq_result '.steps[] | select(.name == "member-node-1") | "\(.phase):\(.status)"')"
 run_teardown "" --auto-approve --json
 expect_eq "--json: stdout is the bare object" "lab" "$(head -n 1 "$OUT" | "${JQ[@]}" --raw-output '.cluster')"
 expect_eq "--json: and only that" 1 "$(wc -l < "$OUT" | tr -d ' ')"
@@ -339,6 +343,8 @@ expect_eq "exits 0" 0 "$RC"
 expect_eq "result is partial" "partial" "$(jq_result '.result')"
 expect_eq "the unreachable member is skipped and says why" "destroyed:Skipped:true" \
   "$(jq_result '.members[] | select(.name == "node-3") | "\(.action):\(.status):\(.message | test("unreachable"))"')"
+expect_eq "its member step says it was skipped" "skipped" \
+  "$(jq_result '.steps[] | select(.name == "member-node-3") | .status')"
 expect_eq "the others are destroyed" "node-1:Applied node-2:Applied node-4:Applied" \
   "$(jq_result '[.members[] | select(.name != "node-3") | "\(.name):\(.status)"] | sort | join(" ")')"
 expect_contains "the log names it" "$ERR" "unreachable"
@@ -352,6 +358,8 @@ expect_eq "exits 1" 1 "$RC"
 expect_eq "result is failed" "failed" "$(jq_result '.result')"
 expect_eq "the member is reported as failed" "destroyed:Failed" \
   "$(jq_result '.members[] | select(.name == "node-2") | "\(.action):\(.status)"')"
+expect_eq "and so is its member step" "failed" \
+  "$(jq_result '.steps[] | select(.name == "member-node-2") | .status')"
 expect_eq "the others are still destroyed" "node-1:Applied node-3:Applied node-4:Applied" \
   "$(jq_result '[.members[] | select(.name != "node-2") | "\(.name):\(.status)"] | sort | join(" ")')"
 : > "$STUB_NIX_FAIL"

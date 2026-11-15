@@ -226,8 +226,12 @@ stdout, so a consumer gets a single marker to grep:
 ::nixcluster:result:: {"cluster":"prod","result":"success","members":[
   {"name":"node-1","ip":"10.0.0.11","action":"switch","status":"Applied","durationSeconds":47},
   {"name":"old-node","ip":"","action":"removed","status":"Applied","message":"removed from the k3s registry (unreachable)"}],
-  "steps":[{"name":"sops.gen","phase":"pre","status":"ok"},{"name":"k3s.prune","phase":"post","status":"ok"}]}
+  "steps":[{"name":"sops.gen","phase":"pre","status":"ok"},{"name":"member-node-1","phase":"member","status":"ok"},
+  {"name":"k3s.prune","phase":"post","status":"ok"}]}
 ```
+
+`steps` lists every step in the order it ran, the `member-<name>` steps
+included; `members` adds the per-member detail (action, address, duration).
 
 ## Checks
 

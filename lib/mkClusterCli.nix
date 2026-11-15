@@ -55,7 +55,7 @@ let
         deps = lib.concatStringsSep " " (map lib.escapeShellArg step.deps);
       in
       if step.member != null
-      then ''run_member_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.member} ${deps}''
+      then ''run_member_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} ${lib.escapeShellArg step.member} ${deps}''
       else ''run_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} ${lib.escapeShellArg (lib.getExe (step.run { inherit pkgs lib cluster helpers; }))} ${deps}'')
     order;
 
@@ -202,15 +202,17 @@ let
 
             # A member step: skip when a dependency failed, otherwise run the
             # command's member action and record the outcome under the STEP name
-            # so dependents can gate on it.
-            run_member_step() { # step-name member [deps...]
-              local name="$1" member="$2"
-              shift 2
-              local blocker
+            # so dependents can gate on it. The step joins the steps array like
+            # any other; its status follows the member entry the action wrote.
+            run_member_step() { # step-name phase member [deps...]
+              local name="$1" phase="$2" member="$3"
+              shift 3
+              local blocker entry
               if blocker=$(failed_dep "$@"); then
                 log "  [member] $member skipped (dependency '$blocker' did not succeed)"
                 add_member "$member" "$(member_ip "$member")" "$MEMBER_SKIP_ACTION" Skipped \
                   "dependency '$blocker' did not succeed" 0
+                add_step "$name" "$phase" skipped "dependency '$blocker' did not succeed"
                 STEP_STATUS[$name]=skipped
                 return 0
               fi
@@ -219,6 +221,12 @@ let
               else
                 STEP_STATUS[$name]=failed
               fi
+              entry=$(jq -c --arg m "$member" 'map(select(.name == $m)) | last // {}' <<<"$MEMBERS_JSON")
+              case "$(jq -r '.status // ""' <<<"$entry")" in
+                Applied) add_step "$name" "$phase" ok "" ;;
+                Skipped) add_step "$name" "$phase" skipped "$(jq -r '.message' <<<"$entry")" ;;
+                *) add_step "$name" "$phase" failed "$(jq -r '.message // "member action failed"' <<<"$entry")" ;;
+              esac
             }
 
             # Emits the single result line and sets RESULT. The overall result
@@ -579,7 +587,7 @@ let
             (name:
               let step = steps.${name}; in
               if step.member != null
-              then ''add_member ${lib.escapeShellArg step.member} "$(member_ip ${lib.escapeShellArg step.member})" destroyed Skipped dry-run 0''
+              then ''add_member ${lib.escapeShellArg step.member} "$(member_ip ${lib.escapeShellArg step.member})" destroyed Skipped dry-run 0; add_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} skipped dry-run''
               else ''add_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} skipped dry-run'')
             stepOrder;
 

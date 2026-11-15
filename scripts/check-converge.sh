@@ -160,6 +160,11 @@ expect_eq "result is success" "success" "$(jq_result '.result')"
 expect_eq "both members are switched" "node-1:switch:Applied node-2:switch:Applied" \
   "$(jq_result '[.members[] | "\(.name):\(.action):\(.status)"] | sort | join(" ")')"
 expect_absent "nothing is installed" "$STUB_CALLS" "nixos-anywhere"
+expect_eq "every step is reported in plan order, member steps included" \
+  "$("${NIX[@]}" eval --impure --raw --file "$REPO_ROOT/scripts/converge-stubs.nix" --argstr repoRoot "$REPO_ROOT" order --apply 'builtins.concatStringsSep " "')" \
+  "$(jq_result '.steps | map(.name) | join(" ")')"
+expect_eq "member steps carry the member phase and succeeded" "member:ok member:ok" \
+  "$(jq_result '[.steps[] | select(.name | startswith("member-")) | "\(.phase):\(.status)"] | join(" ")')"
 
 printf '\n  --dry-run plans every step and touches nothing\n'
 reset_hosts installed
@@ -171,8 +176,8 @@ expect_eq "every step is reported as a dry run" "true" \
   "$(jq_result '(.steps | length) > 0 and (.steps | all(.status == "skipped" and .message == "dry-run"))')"
 expect_eq "every member is reported as a dry run" "node-1:Skipped:dry-run node-2:Skipped:dry-run" \
   "$(jq_result '[.members[] | "\(.name):\(.status):\(.message)"] | sort | join(" ")')"
-expect_eq "the plan covers every module step" "incus.cluster-join incus.prune incus.reconcile k3s.bootstrap k3s.kubeconfig k3s.prune" \
-  "$(jq_result '[.steps[] | select(.phase != "member") | .name] | sort | join(" ")')"
+expect_eq "the plan covers every step" "incus.cluster-join incus.prune incus.reconcile k3s.bootstrap k3s.kubeconfig k3s.prune member-node-1 member-node-2" \
+  "$(jq_result '[.steps[] | .name] | sort | join(" ")')"
 expect_eq "a plan is a success, not a partial run" "success" "$(jq_result '.result')"
 
 printf '\n%d check(s) passed, %d failed\n' "$checks" "$failures"
