@@ -279,13 +279,13 @@ $ scripts/check-prune.sh
 38 check(s) passed, 0 failed
 
 $ scripts/check-teardown.sh
-88 check(s) passed, 0 failed
+99 check(s) passed, 0 failed
 
 $ scripts/check-modules.sh
-2 check(s) passed, 0 failed
+17 check(s) passed, 0 failed
 
 $ scripts/check-converge.sh
-11 check(s) passed, 0 failed
+50 check(s) passed, 0 failed
 ```
 
 `check-templates.sh` locks every registered template against the checkout and
@@ -311,12 +311,19 @@ result JSON.
 
 `check-modules.sh` evaluates the NixOS side of the modules in combination: a
 fixture flake (`scripts/fixtures/modules`) loads them the way a real cluster
-does, and the script asserts what each member's configuration ends up with.
+does (k3s, Incus, sops and keepalived together; Incus without VMs), and the
+script asserts what each member's configuration ends up with: the secrets file,
+the firewall backend and its VRRP rule, the ports between members, and which
+units reference the VM tooling.
 
 `check-converge.sh` runs the real `converge` command of a k3s + Incus cluster
 against stubbed `ssh`, `nixos-anywhere`, `nixos-rebuild`, `nix` and `kubectl`:
 each member is a directory standing in for its root file system, so the probe
-converge sends decides install or switch exactly as it would on a host.
+converge sends decides install or switch exactly as it would on a host. It
+covers switching, installing, a host left in the kexec installer, a failed and
+a hanging install, waiting for the member to come back (or not, or on another
+system), `--json`, `--dry-run`, the shared ssh options, and that `sops gen`
+leaves the secrets file alone when nothing is missing.
 
 ## Architecture
 
@@ -359,6 +366,10 @@ gives every module the same four teardown phases for the same reason.
   covered by evaluation and by stubbed tests only.
 - **Teardown fully resets only the default `dir` Incus storage pool.** Pools on
   zfs, lvm or btrfs with a block-device source are not wiped.
+- **nixos-anywhere uses its own ssh options.** The shared options in
+  `lib/ssh.nix` cover every ssh, scp, `nix copy` and `nixos-rebuild` call, but
+  nixos-anywhere builds its ssh command line itself, so it still reads the
+  system-wide `ssh_config` during an install.
 - **Teardown keeps member patches.** A patch that configures a service
   directly (for example `services.k3s.*` instead of the module's `k3s.*`
   options) stays active after teardown.
