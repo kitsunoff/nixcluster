@@ -193,6 +193,23 @@ expect_eq "the base still has a disk to boot from" '{"main":"/dev/sda"}' \
 expect_eq "the cluster is gone from the base" "false" \
   "$(base_eval 'teardownNixosConfigurations.node1.config.services.k3s.enable')"
 
+# A member's own patches describe the machine (host name, network): dropping
+# them can leave the host without an address, so the next converge cannot reach
+# it. They stay; a patch for a cluster-module option (k3s.role) must still
+# evaluate even though the module itself is gone.
+expect_eq "the member's own patches stay in the base" '"node1"' \
+  "$(base_eval 'teardownNixosConfigurations.node1.config.networking.hostName')"
+expect_eq "a patch for a cluster-module option still evaluates" '"server"' \
+  "$(base_eval 'teardownNixosConfigurations.node1.config.k3s.role')"
+expect_eq "and the module behind it stays off" '[]' \
+  "$(base_eval 'teardownNixosConfigurations.node1.config.systemd.services' \
+    's: builtins.filter (n: n == "k3s" || n == "incus") (builtins.attrNames s)')"
+# Teardown removes the decrypted secrets; the base must not decrypt them again
+# on the switch back, even when the user's own configuration declares some.
+expect_eq "the base decrypts no secrets" '[]' \
+  "$(base_eval 'teardownNixosConfigurations.node1' \
+    'c: builtins.attrNames (c.extendModules { modules = [ { sops.secrets."demo/token" = { }; } ]; }).config.sops.secrets')"
+
 # ---------------------------------------------------------------------------
 # Part B — the real command against stubs.
 # ---------------------------------------------------------------------------
