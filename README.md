@@ -18,9 +18,11 @@ Describe a cluster once — members, roles, modules — and `converge` installs 
 
 > [!WARNING]
 > First-time provisioning runs `nixos-anywhere`, which **wipes the target disk**.
-> `converge` decides install-vs-switch by probing `/run/current-system` over SSH, so
-> a host you did not mean to include is a host you may destroy. Check every
-> `install.ip` and `install.disk` before the first run.
+> `converge` decides install-vs-switch by probing the host over SSH: NixOS with a
+> `/run/current-system` is switched, anything else — including a host still in
+> the NixOS installer after an interrupted install — is installed. A host you did
+> not mean to include is a host you may destroy. Check every `install.ip` and
+> `install.disk` before the first run.
 
 > [!IMPORTANT]
 > Removing a member from the cluster definition now **removes it from the

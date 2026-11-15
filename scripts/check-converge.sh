@@ -108,7 +108,7 @@ jq_result() {
 printf '==> building the converge command with stubbed hosts\n'
 CONVERGE="$("${NIX[@]}" build --impure --no-link --print-out-paths \
   --file "$REPO_ROOT/scripts/converge-stubs.nix" --argstr repoRoot "$REPO_ROOT" \
-  converge 2> "$WORK_DIR/build.err" | tail -n 1)/bin/nixclusterctl-lab-converge"
+  converge 2> "$WORK_DIR/build.err" | tail -n 1 || true)/bin/nixclusterctl-lab-converge"
 if [[ ! -x "$CONVERGE" ]]; then
   fail "could not build the converge command
 $(tail -n 15 "$WORK_DIR/build.err" | sed 's/^/        /')"
@@ -183,6 +183,30 @@ expect_every_ssh_call "every ssh, scp and nixos-rebuild call uses the shared ssh
 expect_contains "the kubeconfig is fetched with them too" "$STUB_CALLS" "scp -F "
 expect_eq "member steps carry the member phase and succeeded" "member:ok member:ok" \
   "$(jq_result '[.steps[] | select(.name | startswith("member-")) | "\(.phase):\(.status)"] | join(" ")')"
+
+printf '\n  fresh members are installed\n'
+reset_hosts fresh
+run_converge
+expect_eq "exits 0" 0 "$RC"
+expect_eq "both members are installed" "node-1:install:Applied node-2:install:Applied" \
+  "$(jq_result '[.members[] | "\(.name):\(.action):\(.status)"] | sort | join(" ")')"
+expect_contains "with nixos-anywhere" "$STUB_CALLS" "nixos-anywhere --flake .#lab-node-1"
+expect_absent "and nothing is switched" "$STUB_CALLS" "nixos-rebuild"
+
+printf '\n  a member still in the kexec installer is installed, not switched\n'
+# An interrupted install leaves the host in nixos-anywhere's kexec installer,
+# which has a /run/current-system of its own. Switching it would put the
+# cluster's system on a RAM disk that is gone after the next reboot.
+reset_hosts installed
+host_state 10.0.0.2 installer
+run_converge
+expect_eq "exits 0" 0 "$RC"
+expect_eq "the installer member is installed" "install:Applied" \
+  "$(jq_result '.members[] | select(.name == "node-2") | "\(.action):\(.status)"')"
+expect_contains "with nixos-anywhere" "$STUB_CALLS" "nixos-anywhere --flake .#lab-node-2"
+expect_absent "and is not switched" "$STUB_CALLS" "nixos-rebuild switch --flake .#lab-node-2"
+expect_eq "the installed member is still switched" "switch:Applied" \
+  "$(jq_result '.members[] | select(.name == "node-1") | "\(.action):\(.status)"')"
 
 printf '\n  --json keeps stdout a bare object and the marker in the log\n'
 reset_hosts installed

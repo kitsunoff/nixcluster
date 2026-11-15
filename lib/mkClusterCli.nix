@@ -492,6 +492,27 @@ let
             MEMBER_SKIP_ACTION=noop
             member_action() { converge_member "$1"; }
 
+            # What a member is, decided on the member:
+            #   INSTALLER  the NixOS installer — what nixos-anywhere's kexec
+            #              image runs, so an install that was interrupted after
+            #              kexec. It has a /run/current-system of its own, so it
+            #              must be recognised before that test. Same rule as
+            #              nixos-anywhere: VARIANT_ID=installer in os-release.
+            #   INSTALLED  NixOS, so it is switched
+            #   FRESH      anything else, so it is installed (disk wiped)
+            # shellcheck disable=SC2016
+            MEMBER_PROBE='if grep -Eq '"'"'^VARIANT_ID="?installer"?$'"'"' /etc/os-release 2>/dev/null; then echo INSTALLER; elif test -e /run/current-system; then echo INSTALLED; else echo FRESH; fi'
+
+            install_member() { # member ip start
+              local member="$1" ip="$2" start="$3" end
+              log "=== install $member ($ip) [nixos-anywhere] ==="
+              if nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}"; then
+                end=$(date +%s); add_member "$member" "$ip" install Applied "" $((end - start))
+              else
+                end=$(date +%s); add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
+              fi
+            }
+
             # Installs or switches one member. Returns non-zero only when the
             # member genuinely failed to converge; a dry run plans it.
             converge_member() { # member
@@ -508,10 +529,15 @@ let
                 return 1
               fi
               start=$(date +%s)
-              probe=$(ssh "''${SSH_OPTS[@]}" "root@$ip" \
-                'test -e /run/current-system && echo INSTALLED || echo FRESH' 2>/dev/null \
+              # The probe is a fixed script, meant to be sent as it is.
+              # shellcheck disable=SC2029
+              probe=$(ssh "''${SSH_OPTS[@]}" "root@$ip" "$MEMBER_PROBE" 2>/dev/null \
                 || echo UNREACHABLE)
               case "$probe" in
+                INSTALLER)
+                  log "  [member] $member ($ip) is running the NixOS installer (an interrupted install?)"
+                  install_member "$member" "$ip" "$start"
+                  ;;
                 INSTALLED)
                   log "=== switch $member ($ip) [nixos-rebuild] ==="
                   # nixos-rebuild reads its ssh options ONLY from NIX_SSHOPTS, not
@@ -525,12 +551,7 @@ let
                   fi
                   ;;
                 FRESH)
-                  log "=== install $member ($ip) [nixos-anywhere] ==="
-                  if nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}"; then
-                    end=$(date +%s); add_member "$member" "$ip" install Applied "" $((end - start))
-                  else
-                    end=$(date +%s); add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
-                  fi
+                  install_member "$member" "$ip" "$start"
                   ;;
                 *)
                   end=$(date +%s); add_member "$member" "$ip" noop Failed "unreachable ($probe)" $((end - start))
