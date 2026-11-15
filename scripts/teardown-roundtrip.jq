@@ -50,8 +50,9 @@ def rank: {workloads: 0, leave: 1, cleanup: 2, member: 3}[.];
    as $edges
    | [$t[] | select(test("\\.leave-")) | split(".leave-")[0]] | unique
    | map(. as $module
-       | $edges[]
-       | select(($plan.teardown.deps["\($module).leave-\(.x)"] != null)
-                and ($plan.teardown.deps["\($module).leave-\(.y)"] != null))
-       | select($plan.teardown.deps["\($module).leave-\(.y)"] | index("\($module).leave-\(.x)") | not)
-       | "\($module).leave-\(.y) does not wait for \($module).leave-\(.x) (member-\(.x) waited for member-\(.y) in converge)"))
+       | $edges[] as $e
+       | ($plan.teardown.deps["\($module).leave-\($e.x)"]) as $xDeps
+       | ($plan.teardown.deps["\($module).leave-\($e.y)"]) as $yDeps
+       | select($xDeps != null and $yDeps != null)
+       | select($yDeps | index("\($module).leave-\($e.x)") | not)
+       | "\($module).leave-\($e.y) does not wait for \($module).leave-\($e.x) (member-\($e.x) waited for member-\($e.y) in converge)"))
