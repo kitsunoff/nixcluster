@@ -215,6 +215,10 @@ nix run .#cluster-prod -- gen-config 10.0.0.12  # SSH-discover a node, emit a me
 nix run .#cluster-prod -- k3s nodes             # module command groups
 ```
 
+`--dry-run` walks the whole plan without touching a host: every step and member
+is reported as `skipped` with the message `dry-run`, and the result is
+`success`.
+
 `converge` and `teardown` write human output to stderr and exactly one machine-readable line to
 stdout, so a consumer gets a single marker to grep:
 
@@ -242,6 +246,9 @@ $ scripts/check-teardown.sh
 
 $ scripts/check-modules.sh
 2 check(s) passed, 0 failed
+
+$ scripts/check-converge.sh
+11 check(s) passed, 0 failed
 ```
 
 `check-templates.sh` locks every registered template against the checkout and
@@ -268,6 +275,11 @@ result JSON.
 `check-modules.sh` evaluates the NixOS side of the modules in combination: a
 fixture flake (`scripts/fixtures/modules`) loads them the way a real cluster
 does, and the script asserts what each member's configuration ends up with.
+
+`check-converge.sh` runs the real `converge` command of a k3s + Incus cluster
+against stubbed `ssh`, `nixos-anywhere`, `nixos-rebuild`, `nix` and `kubectl`:
+each member is a directory standing in for its root file system, so the probe
+converge sends decides install or switch exactly as it would on a host.
 
 ## Architecture
 

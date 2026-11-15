@@ -280,6 +280,7 @@ expect_eq "every member is planned for destruction, not destroyed" \
   "$(jq_result '[.members[] | "\(.name):\(.action):\(.status):\(.message)"] | sort | join(" ")')"
 expect_eq "every step is skipped as dry-run" "true" \
   "$(jq_result '(.steps | length) > 0 and (.steps | all(.status == "skipped" and .message == "dry-run"))')"
+expect_eq "a plan is a success, not a partial run" "success" "$(jq_result '.result')"
 
 printf '\n  "yes" proceeds\n'
 run_teardown $'yes\n'

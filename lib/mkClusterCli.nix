@@ -70,15 +70,17 @@ let
             MEMBERS_JSON='[]'
             STEPS_JSON='[]'
 
-            # Outcome of every step by name ("ok" | "failed" | "skipped"), so a
-            # step whose dependency did not succeed is skipped instead of run.
+            # Outcome of every step by name ("ok" | "planned" | "failed" |
+            # "skipped"), so a step whose dependency did not succeed is skipped
+            # instead of run. "planned" is a dry-run step: it did not run, but
+            # it would have, so the steps after it are planned too.
             declare -A STEP_STATUS=()
 
             # Echoes the first dependency that did not succeed, if any.
             failed_dep() {
               local dep
               for dep in "$@"; do
-                if [[ "''${STEP_STATUS[$dep]:-missing}" != "ok" ]]; then
+                if [[ ! "''${STEP_STATUS[$dep]:-missing}" =~ ^(ok|planned)$ ]]; then
                   echo "$dep"
                   return 0
                 fi
@@ -176,7 +178,7 @@ let
               if [[ "$DRY_RUN" -eq 1 ]]; then
                 log "  [step:$phase] $name (dry-run, not executed)"
                 add_step "$name" "$phase" skipped "dry-run"
-                STEP_STATUS[$name]=skipped
+                STEP_STATUS[$name]=planned
                 return 0
               fi
               log "=== step [$phase] $name ==="
@@ -213,7 +215,7 @@ let
                 return 0
               fi
               if member_action "$member"; then
-                STEP_STATUS[$name]=ok
+                if [[ "$DRY_RUN" -eq 1 ]]; then STEP_STATUS[$name]=planned; else STEP_STATUS[$name]=ok; fi
               else
                 STEP_STATUS[$name]=failed
               fi
@@ -221,11 +223,14 @@ let
 
             # Emits the single result line and sets RESULT. The overall result
             # comes from the accumulated members and steps unless one is given.
+            # A dry run that planned everything is a success: everything it
+            # reports as skipped was skipped on purpose.
             emit_result() { # [result]
               RESULT="''${1:-}"
               if [[ -z "$RESULT" ]]; then
-                RESULT=$(jq -rn --argjson m "$MEMBERS_JSON" --argjson s "$STEPS_JSON" '
+                RESULT=$(jq -rn --argjson m "$MEMBERS_JSON" --argjson s "$STEPS_JSON" --argjson dry "$DRY_RUN" '
                   if ($m | any(.status=="Failed")) or ($s | any(.status=="failed")) then "failed"
+                  elif $dry == 1 then "success"
                   elif ($m | any(.status=="Skipped")) or ($s | any(.status=="skipped")) then "partial"
                   else "success" end')
               fi
@@ -476,14 +481,14 @@ let
             member_action() { converge_member "$1"; }
 
             # Installs or switches one member. Returns non-zero only when the
-            # member genuinely failed to converge (a dry-run is not a failure).
+            # member genuinely failed to converge; a dry run plans it.
             converge_member() { # member
               local member="$1" ip probe start end
               ip="$(member_ip "$member")"
               if [[ "$DRY_RUN" -eq 1 ]]; then
                 log "  [member] $member -> ''${ip:-<no-ip>} (dry-run, not probed)"
                 add_member "$member" "$ip" noop Skipped "dry-run" 0
-                return 1
+                return 0
               fi
               if [[ -z "$ip" ]]; then
                 log "  [member] $member has no install.ip; skipping"
@@ -535,7 +540,7 @@ let
             # Reflect a hard convergence failure in the exit code so a consumer
             # driving converge as a Job (NIO's converge NixCronJob) sees the run
             # fail instead of silently succeeding. "partial" (only Skipped, e.g.
-            # dry-run or an absent optional step) is NOT a failure.
+            # an unreachable member) is NOT a failure.
             if [[ "$RESULT" == "failed" ]]; then
               exit 1
             fi
