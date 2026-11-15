@@ -103,5 +103,28 @@ expect_eq "a clustered Incus opens its cluster API (TCP 8443)" "true" \
 expect_eq "a host without Incus or k3s opens neither" "false false" \
   "$(member_eval plain-node-1 networking.firewall.allowedTCPPorts "$(has_port 8443)") $(member_eval plain-node-1 networking.firewall.allowedUDPPorts "$(has_port 8472)")"
 
+printf '\n==> Incus without virtual machines\n'
+
+# Where VMs are impossible (no nested KVM) qemu and the UEFI firmware are dead
+# weight in every member's closure. The Incus units are what pull them in.
+vm_refs() { # cluster-member -> the VM pieces any Incus unit still references
+  member_eval "$1" systemd.units 'units: builtins.sort builtins.lessThan (builtins.filter (x: x != null) (map
+    (needle: if builtins.any (unit: builtins.match "(.*[^A-Za-z])?${needle}.*" (units.${unit}.text or "") != null)
+      [ "incus.service" "incus-user.service" "incus-startup.service" ] then needle else null)
+    [ "qemu" "ovmf" "virtiofsd" "swtpm" "seabios" ]))'
+}
+expect_eq "by default an Incus member can run VMs (its units reference them)" '["ovmf","qemu","swtpm","virtiofsd"]' \
+  "$(vm_refs lab-node-1)"
+expect_eq "with incus.virtualMachines = false no Incus unit references them" '[]' "$(vm_refs lite-node-1)"
+expect_eq "the containers-only member still evaluates" "true" \
+  "$(member_eval lite-node-1 system.build.toplevel.drvPath 'p: builtins.isString p')"
+expect_eq "and still runs Incus" "true" "$(member_eval lite-node-1 virtualisation.incus.enable)"
+expect_eq "a VM instance on a containers-only member is refused" "true" \
+  "$("${NIX[@]}" eval --json "path:$FLAKE#nixosConfigurations.\"lite-node-1\"" --apply '
+    c: let e = c.extendModules { modules = [ {
+      incus.instances.vm = { node = "node-1"; type = "virtual-machine"; image = "images:debian/12"; };
+    } ]; };
+    in builtins.any (x: !x.assertion && builtins.match ".*virtualMachines.*" x.message != null) e.config.assertions' 2>&1)"
+
 printf '\n%d check(s) passed, %d failed\n' "$checks" "$failures"
 [[ "$failures" -eq 0 ]]

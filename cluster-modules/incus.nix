@@ -548,6 +548,16 @@ in
       };
     };
 
+    virtualMachines = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether members can run virtual machines. Set it to false where VMs
+        are impossible (no nested KVM): Incus then runs containers only and
+        qemu and the UEFI firmware stay out of every member's closure.
+      '';
+    };
+
     instances = lib.mkOption {
       type = lib.types.attrsOf (lib.types.attrsOf lib.types.anything);
       default = {};
@@ -569,7 +579,7 @@ in
     # pick bootstrap vs joiner. This drives membership off the cluster-level
     # `incus.cluster.enable`, never the per-member patch (followup C).
     _generatedNixosModules = lib.genAttrs (lib.attrNames config.members) (_:
-      [ incusNixosModule { incus.instances = cfg.instances; } ]
+      [ incusNixosModule { incus.instances = cfg.instances; incus.virtualMachines = cfg.virtualMachines; } ]
       ++ lib.optional clusterEnabled {
         incus.enable = true;
         incus.storagePool = cfg.cluster.storagePool;

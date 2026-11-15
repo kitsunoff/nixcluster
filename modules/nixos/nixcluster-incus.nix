@@ -102,6 +102,24 @@ let
     if isJoiner then null
     else lib.recursiveUpdate (if isBootstrap then bootstrapPreseed else basePreseed) cfg.preseed;
 
+  # Containers-only Incus: upstream hardwires the VM tooling into the PATH and
+  # the firmware into INCUS_EDK2_PATH of every Incus unit. Rebuild PATH from the
+  # unit's own `path` without it (PATH is a separate option, so this does not
+  # recurse) and drop the firmware variable.
+  vmPackagePrefixes = [ "qemu" "incus-qemu-libexec" "OVMF" "virtiofsd" "swtpm" "seabios" ];
+  isVmPackage = p: lib.isDerivation p
+    && lib.any (prefix: lib.hasPrefix prefix (lib.getName p)) vmPackagePrefixes;
+  incusUnits = [ "incus" "incus-user" ]
+    ++ lib.optional config.virtualisation.incus.softDaemonRestart "incus-startup";
+  withoutVmTooling = unit:
+    let path = lib.filter (p: !(isVmPackage p)) config.systemd.services.${unit}.path;
+    in {
+      environment = {
+        PATH = lib.mkForce "${lib.makeBinPath path}:${lib.makeSearchPathOutput "bin" "sbin" path}";
+        INCUS_EDK2_PATH = lib.mkForce null;
+      };
+    };
+
   # Instances bound to THIS node.
   thisInstances = lib.filterAttrs (_: i: i.node == thisMember) cfg.instances;
 
@@ -190,6 +208,18 @@ in
 
     uiEnable = lib.mkEnableOption "the Incus web UI";
 
+    virtualMachines = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether this node can run virtual machines. When false, Incus runs
+        containers only: qemu, virtiofsd, swtpm and the UEFI firmware are kept
+        out of the Incus units and so out of the closure. Use it where VMs are
+        impossible anyway (no nested KVM). With AppArmor enabled, the upstream
+        Incus profile still names qemu and the firmware.
+      '';
+    };
+
     # Multi-node clustering role, populated per member by the cluster-level
     # incus module (cluster-modules/incus.nix). Left at defaults for standalone
     # single-node use (cluster.enable = false -> pre-clustering behavior).
@@ -260,12 +290,21 @@ in
 
     networking.firewall.trustedInterfaces = [ cfg.bridgeName ];
 
+
+    assertions = [{
+      assertion = cfg.virtualMachines
+        || lib.all (i: i.type != "virtual-machine") (lib.attrValues thisInstances);
+      message = "incus: this node has incus.virtualMachines = false but hosts a virtual-machine instance.";
+    }];
+
     # Cluster members reach each other on the HTTPS API (joining, database).
     networking.firewall.allowedTCPPorts = lib.mkIf isClustered [ clusterCfg.httpsPort ];
 
     # Reconcile declarative instances bound to this node (Part A). Only runs
     # when this node actually hosts at least one declared instance.
-    systemd.services.incus-instances-reconcile = lib.mkIf (thisInstances != {}) {
+    systemd.services = lib.mkMerge [
+      (lib.mkIf (!cfg.virtualMachines) (lib.genAttrs incusUnits withoutVmTooling))
+      { incus-instances-reconcile = lib.mkIf (thisInstances != {}) {
       description = "Reconcile declarative Incus instances for this node";
       after = [ "incus.service" "incus-preseed.service" "network-online.target" ];
       wants = [ "network-online.target" ];
@@ -338,6 +377,7 @@ in
           fi
         done < <(incus list --format csv -c n 2>/dev/null || true)
       '';
-    };
+    }; }
+    ];
   };
 }

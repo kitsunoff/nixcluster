@@ -6,6 +6,7 @@
 #   lab     k3s + Incus cluster + sops + keepalived on two members: the
 #           combination of the live demo
 #   plain   keepalived alone, so the host keeps the iptables firewall
+#   lite    Incus without virtual machines
 #
 # `nixcluster` is overridden to the checkout under test by the check script.
 {
@@ -74,6 +75,19 @@
 
           defaultNixosConfiguration = self.nixosConfigurations.base;
           members.node-1.install.ip = "10.0.1.1";
+        };
+
+      nixcluster.lite =
+        { clusterModules, self, ... }:
+        {
+          imports = with clusterModules; [ incus ];
+
+          incus.enable = true;
+          incus.cluster.enable = true;
+          incus.virtualMachines = false;
+
+          defaultNixosConfiguration = self.nixosConfigurations.base;
+          members.node-1.install.ip = "10.0.2.1";
         };
     };
 }
