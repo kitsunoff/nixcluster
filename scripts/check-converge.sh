@@ -208,6 +208,32 @@ expect_absent "and is not switched" "$STUB_CALLS" "nixos-rebuild switch --flake 
 expect_eq "the installed member is still switched" "switch:Applied" \
   "$(jq_result '.members[] | select(.name == "node-1") | "\(.action):\(.status)"')"
 
+printf '\n  a failed install fails the member and skips what depends on it\n'
+reset_hosts fresh
+printf '10.0.0.1\n' > "$STUB_ANYWHERE_FAIL"
+run_converge
+expect_eq "exits 1" 1 "$RC"
+expect_eq "the member failed" "install:Failed" \
+  "$(jq_result '.members[] | select(.name == "node-1") | "\(.action):\(.status)"')"
+expect_eq "the member that joins it is skipped" "Skipped" \
+  "$(jq_result '.members[] | select(.name == "node-2") | .status')"
+expect_eq "so is every step after it" "true" \
+  "$(jq_result '[.steps[] | select(.name != "member-node-1") | .status] | all(. == "skipped")')"
+
+printf '\n  a hanging nixos-anywhere is stopped by the install timeout\n'
+reset_hosts fresh
+printf '10.0.0.1\n' > "$STUB_ANYWHERE_HANG"
+started=$(date +%s)
+run_converge
+elapsed=$(( $(date +%s) - started ))
+expect_eq "exits 1" 1 "$RC"
+expect_eq "within the timeout, not after the hang (3s timeout, ${elapsed}s)" "true" \
+  "$([[ "$elapsed" -lt 30 ]] && echo true || echo false)"
+expect_eq "the member failed and says it timed out" "install:Failed:true" \
+  "$(jq_result '.members[] | select(.name == "node-1") | "\(.action):\(.status):\(.message | test("timed out"))"')"
+expect_eq "what depends on it is skipped" "Skipped" \
+  "$(jq_result '.members[] | select(.name == "node-2") | .status')"
+
 printf '\n  --json keeps stdout a bare object and the marker in the log\n'
 reset_hosts installed
 run_converge --json

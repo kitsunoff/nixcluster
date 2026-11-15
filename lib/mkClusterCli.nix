@@ -503,14 +503,26 @@ let
             # shellcheck disable=SC2016
             MEMBER_PROBE='if grep -Eq '"'"'^VARIANT_ID="?installer"?$'"'"' /etc/os-release 2>/dev/null; then echo INSTALLER; elif test -e /run/current-system; then echo INSTALLED; else echo FRESH; fi'
 
+            # Bounded: nixos-anywhere can hang forever after kexec waiting for
+            # the host to go down. timeout exits 124 when it stops it.
+            INSTALL_TIMEOUT=${toString cluster.converge.installTimeoutSeconds}
+
             install_member() { # member ip start
-              local member="$1" ip="$2" start="$3" end
-              log "=== install $member ($ip) [nixos-anywhere] ==="
-              if nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}"; then
-                end=$(date +%s); add_member "$member" "$ip" install Applied "" $((end - start))
-              else
-                end=$(date +%s); add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
-              fi
+              local member="$1" ip="$2" start="$3" end rc=0
+              log "=== install $member ($ip) [nixos-anywhere, at most ''${INSTALL_TIMEOUT}s] ==="
+              timeout --kill-after=30 "$INSTALL_TIMEOUT" \
+                nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}" || rc=$?
+              end=$(date +%s)
+              case "$rc" in
+                0) add_member "$member" "$ip" install Applied "" $((end - start)) ;;
+                124|137)
+                  log "  [member] $member: nixos-anywhere timed out after ''${INSTALL_TIMEOUT}s"
+                  add_member "$member" "$ip" install Failed "nixos-anywhere timed out after ''${INSTALL_TIMEOUT}s" $((end - start))
+                  return 1 ;;
+                *)
+                  add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
+                  return 1 ;;
+              esac
             }
 
             # Installs or switches one member. Returns non-zero only when the
@@ -548,6 +560,7 @@ let
                     end=$(date +%s); add_member "$member" "$ip" switch Applied "" $((end - start))
                   else
                     end=$(date +%s); add_member "$member" "$ip" switch Failed "nixos-rebuild switch failed" $((end - start))
+                    return 1
                   fi
                   ;;
                 FRESH)
@@ -555,6 +568,7 @@ let
                   ;;
                 *)
                   end=$(date +%s); add_member "$member" "$ip" noop Failed "unreachable ($probe)" $((end - start))
+                  return 1
                   ;;
               esac
             }

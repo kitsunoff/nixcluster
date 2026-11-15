@@ -165,6 +165,9 @@ let
     incus.enable = true;
     incus.cluster.enable = true;
 
+    # Short, so the hang case finishes quickly.
+    converge.installTimeoutSeconds = 3;
+
     members.node-1 = { install.ip = "10.0.0.1"; k3s.role = "server"; };
     members.node-2 = { install.ip = "10.0.0.2"; k3s.role = "server"; };
   };

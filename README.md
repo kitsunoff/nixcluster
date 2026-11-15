@@ -109,7 +109,12 @@ and does not care about agents; and pruning happens last, once the desired membe
 have converged.
 
 A step whose dependency did not succeed is **skipped**, not run — a failed
-bootstrap does not drag the agents through a pointless join attempt.
+bootstrap does not drag the agents through a pointless join attempt. A member
+that fails to install or switch counts as a failed step the same way.
+
+An install is bounded by `converge.installTimeoutSeconds` (default 3600):
+nixos-anywhere can wait forever for a host that does not seem to go down after
+kexec, and the timeout turns that into a failed member instead of a stuck run.
 
 `preSteps` / `postSteps` still exist as sugar over the same attrset, carrying the
 dependencies their names implied.

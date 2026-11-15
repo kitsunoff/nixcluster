@@ -305,6 +305,17 @@ in
             '';
           };
 
+          installTimeoutSeconds = lib.mkOption {
+            type = lib.types.ints.positive;
+            default = 3600;
+            description = ''
+              How long one member's install (nixos-anywhere) may take before it
+              is stopped and the member fails. nixos-anywhere can wait forever
+              for a host that never seems to go down after kexec; the bound
+              turns that hang into a failed member instead of a stuck converge.
+            '';
+          };
+
           preSteps = lib.mkOption {
             type = lib.types.attrsOf stepType;
             default = {};
