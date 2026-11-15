@@ -128,5 +128,11 @@ in
     _generatedNixosModules = lib.genAttrs (lib.attrNames config.members) (_:
       [ diskoNixosModule ]
     );
+
+    # The disk layout describes the machine, not the cluster: teardown keeps it,
+    # so the base a member is switched back to still mounts the disk it boots from.
+    _teardownNixosModules = lib.genAttrs (lib.attrNames config.members) (_:
+      [ diskoNixosModule ]
+    );
   };
 }
