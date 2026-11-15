@@ -63,7 +63,8 @@ let
   # `member_action <member>` + MEMBER_SKIP_ACTION to be defined before the walk.
   stepRunner = ''
             # All human output goes to stderr; stdout carries ONLY the result
-            # line so `--json` yields a bare object and greppers get one marker.
+            # line so `--json` yields a bare object and greppers get one marker
+            # (on stderr under --json, see emit_result).
             log() { echo "$@" >&2; }
 
             # --- accumulators (built with jq; never hand-concatenated) ---------
@@ -249,8 +250,12 @@ let
                 '{cluster:$cluster,result:$result,members:$members,steps:$steps}')
 
               log ""
+              # --json keeps stdout a bare object for `jq`; the marker line
+              # then goes to the log (stderr) instead, so a consumer that
+              # greps the combined output for it finds it either way.
               if [[ "$JSON" -eq 1 ]]; then
                 printf '%s\n' "$final"
+                log "::nixcluster:result:: $final"
               else
                 printf '::nixcluster:result:: %s\n' "$final"
               fi

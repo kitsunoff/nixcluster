@@ -166,6 +166,15 @@ expect_eq "every step is reported in plan order, member steps included" \
 expect_eq "member steps carry the member phase and succeeded" "member:ok member:ok" \
   "$(jq_result '[.steps[] | select(.name | startswith("member-")) | "\(.phase):\(.status)"] | join(" ")')"
 
+printf '\n  --json keeps stdout a bare object and the marker in the log\n'
+reset_hosts installed
+run_converge --json
+expect_eq "exits 0" 0 "$RC"
+expect_eq "stdout is one line" 1 "$(wc -l < "$OUT" | tr -d ' ')"
+expect_eq "and it is the bare result object" "lab" "$("${JQ[@]}" --raw-output '.cluster' "$OUT")"
+expect_eq "stderr carries the same result behind the marker" \
+  "$(cat "$OUT")" "$(sed -n 's/^::nixcluster:result:: //p' "$ERR")"
+
 printf '\n  --dry-run plans every step and touches nothing\n'
 reset_hosts installed
 run_converge --dry-run

@@ -335,6 +335,9 @@ expect_eq "a member step carries the member phase" "member:ok" \
 run_teardown "" --auto-approve --json
 expect_eq "--json: stdout is the bare object" "lab" "$(head -n 1 "$OUT" | "${JQ[@]}" --raw-output '.cluster')"
 expect_eq "--json: and only that" 1 "$(wc -l < "$OUT" | tr -d ' ')"
+expect_eq "--json: the marker line still reaches the log (stderr) for greppers" \
+  "$(head -n 1 "$OUT")" \
+  "$(sed -n 's/^::nixcluster:result:: //p' "$ERR")"
 
 printf '\n  an unreachable member is reported, not fatal\n'
 printf '10.0.0.3\n' > "$STUB_UNREACHABLE"

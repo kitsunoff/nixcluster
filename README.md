@@ -230,6 +230,10 @@ stdout, so a consumer gets a single marker to grep:
   {"name":"k3s.prune","phase":"post","status":"ok"}]}
 ```
 
+With `--json`, stdout is the bare object instead, and the marker line moves to
+stderr: a consumer that reads stdout gets plain JSON, and one that greps the
+combined log (a Kubernetes Job's pod log, for example) still finds the marker.
+
 `steps` lists every step in the order it ran, the `member-<name>` steps
 included; `members` adds the per-member detail (action, address, duration).
 
