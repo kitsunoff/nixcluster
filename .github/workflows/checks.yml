@@ -57,3 +57,26 @@ jobs:
       # injected registry, and the real k3s step against stubbed kubectl/ssh.
       - name: Check prune logic
         run: ./scripts/check-prune.sh
+
+  teardown:
+    name: Teardown logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      # Teardown removes everything a cluster created, so its plan and its
+      # command are verified on every change: the order (converge in reverse),
+      # what a member is switched back to, and the real command — prompt,
+      # dry run, unreachable and failing members — against stubbed ssh/nix.
+      - name: Check teardown logic
+        run: ./scripts/check-teardown.sh
