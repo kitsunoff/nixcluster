@@ -91,6 +91,22 @@ let
         map (vip: ''check_row "${name}" "${node}" "${vip}"'') vips) i.nodes)
     instances));
 
+  # --- teardown ---------------------------------------------------------------
+  # keepalived holds no cluster membership, so there is nothing to leave: each
+  # participating member stops VRRP (releasing its VIPs) and loses the config
+  # rendered at runtime. See lib/teardown.nix for the shape.
+  teardownLib = import ../lib/teardown.nix { inherit lib; };
+
+  teardownCleanup = member: { pkgs, ... }: teardownLib.mkHostStep {
+    inherit pkgs member;
+    name = "keepalived.cleanup";
+    ip = config.members.${member}.install.ip or null;
+    script = ''
+      stop_unit keepalived.service
+      remove_paths /run/keepalived
+    '';
+  };
+
   keepalivedCommands = {
     status = {
       description = "Show VRRP VIP ownership across nodes (table)";
@@ -145,6 +161,17 @@ in
         description = "keepalived VRRP management";
         actions = keepalivedCommands;
       };
+
+      teardown.steps = lib.mkIf (participatingMembers != []) (teardownLib.mkModuleSteps {
+        cluster = config;
+        module = "keepalived";
+        members = participatingMembers;
+        offset = 2;
+        cleanup = member: {
+          description = "Stop keepalived and release its VIPs on ${member}";
+          run = teardownCleanup member;
+        };
+      });
 
       # No converge step: keepalived needs no runtime orchestration. Its VRRP
       # auth password is delivered via the sops provider (below) and applied by
