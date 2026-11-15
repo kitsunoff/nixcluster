@@ -18,7 +18,9 @@ NIX=(nix --extra-experimental-features "nix-command flakes")
 # Resolve jq once; `nix run` per call would re-evaluate nixpkgs every time.
 JQ=("$("${NIX[@]}" build --no-link --print-out-paths nixpkgs#jq.bin)/bin/jq")
 
-WORK_DIR="$(mktemp -d)"
+# Resolved: on macOS the temp dir sits behind the /var symlink, and a fake host
+# root must read back the same path `readlink -f` reports inside it.
+WORK_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 checks=0
@@ -121,6 +123,7 @@ export STUB_ROOT="$WORK_DIR/hosts"
 export STUB_UNREACHABLE="$WORK_DIR/unreachable"
 export STUB_ANYWHERE_FAIL="$WORK_DIR/anywhere-fail"
 export STUB_ANYWHERE_HANG="$WORK_DIR/anywhere-hang"
+export STUB_WRONG_SYSTEM="$WORK_DIR/wrong-system"
 OUT="$WORK_DIR/stdout"
 ERR="$WORK_DIR/stderr"
 
@@ -163,6 +166,7 @@ reset_hosts() { # state for both members
   : > "$STUB_UNREACHABLE"
   : > "$STUB_ANYWHERE_FAIL"
   : > "$STUB_ANYWHERE_HANG"
+  : > "$STUB_WRONG_SYSTEM"
   unset STUB_REBOOT_SECONDS
   host_state 10.0.0.1 "$1"
   host_state 10.0.0.2 "$1"
@@ -233,6 +237,37 @@ expect_eq "the member failed and says it timed out" "install:Failed:true" \
   "$(jq_result '.members[] | select(.name == "node-1") | "\(.action):\(.status):\(.message | test("timed out"))"')"
 expect_eq "what depends on it is skipped" "Skipped" \
   "$(jq_result '.members[] | select(.name == "node-2") | .status')"
+
+printf '\n  after an install converge waits for the member to come back\n'
+# nixos-anywhere returns while the host reboots into its new system. The steps
+# after it (kubeconfig, Incus join) need the host up and on that system.
+reset_hosts fresh
+export STUB_REBOOT_SECONDS=2
+run_converge
+expect_eq "exits 0" 0 "$RC"
+expect_eq "both members are installed" "node-1:install:Applied node-2:install:Applied" \
+  "$(jq_result '[.members[] | "\(.name):\(.action):\(.status)"] | sort | join(" ")')"
+expect_eq "every step after them succeeded on the first run" "true" \
+  "$(jq_result '.steps | all(.status == "ok")')"
+expect_contains "the log says it waited" "$ERR" "is back on ${SYSTEM_PREFIX}node-1"
+
+printf '\n  a member that does not come back fails\n'
+reset_hosts fresh
+export STUB_REBOOT_SECONDS=600
+run_converge
+expect_eq "exits 1" 1 "$RC"
+expect_eq "the member failed and says why" "install:Failed:true" \
+  "$(jq_result '.members[] | select(.name == "node-1") | "\(.action):\(.status):\(.message | test("did not come back"))"')"
+expect_eq "what depends on it is skipped" "Skipped" \
+  "$(jq_result '.members[] | select(.name == "node-2") | .status')"
+
+printf '\n  a member that comes back on another system fails\n'
+reset_hosts fresh
+printf '10.0.0.1\n' > "$STUB_WRONG_SYSTEM"
+run_converge
+expect_eq "exits 1" 1 "$RC"
+expect_eq "the member failed and names the system it runs" "install:Failed:true" \
+  "$(jq_result '.members[] | select(.name == "node-1") | "\(.action):\(.status):\(.message | test("nixos-system-other"))"')"
 
 printf '\n  --json keeps stdout a bare object and the marker in the log\n'
 reset_hosts installed

@@ -316,6 +316,17 @@ in
             '';
           };
 
+          rebootTimeoutSeconds = lib.mkOption {
+            type = lib.types.ints.positive;
+            default = 900;
+            description = ''
+              How long to wait, after a member's install, for it to answer SSH
+              again with /run/current-system pointing at the system that was
+              installed. The steps after the member (joining a cluster,
+              fetching a kubeconfig) run only once it is back.
+            '';
+          };
+
           preSteps = lib.mkOption {
             type = lib.types.attrsOf stepType;
             default = {};

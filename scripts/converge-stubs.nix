@@ -24,6 +24,7 @@
 #   STUB_UNREACHABLE    addresses that never answer ssh
 #   STUB_ANYWHERE_FAIL  addresses nixos-anywhere fails on
 #   STUB_ANYWHERE_HANG  addresses nixos-anywhere never returns for
+#   STUB_WRONG_SYSTEM   addresses that come back from the install on another system
 #   STUB_REBOOT_SECONDS seconds an installed member stays down after nixos-anywhere
 #                       (a number, not a file; 0 when unset)
 #
@@ -94,6 +95,15 @@ let
   stubScp = pkgs.writeShellScriptBin "scp" ''
     ${common}
     printf '%s\n' "scp $*" >> "$STUB_CALLS"
+    for arg in "$@"; do
+      case "$arg" in
+        root@*:*) ip="''${arg#root@}"; ip="''${ip%%:*}" ;;
+      esac
+    done
+    if [ -n "''${ip:-}" ] && is_down "$ip"; then
+      echo "ssh: connect to host $ip port 22: Connection refused" >&2
+      exit 1
+    fi
     for last in "$@"; do :; done
     printf 'apiVersion: v1\nclusters: []\n' > "$last"
   '';
@@ -117,6 +127,7 @@ let
     if listed "''${STUB_ANYWHERE_FAIL:-}" "$ip"; then echo "stub: install failed" >&2; exit 1; fi
     root="$STUB_ROOT/$ip"
     system="$root/nix/store/00000000000000000000000000000000-nixos-system-lab-$member"
+    if listed "''${STUB_WRONG_SYSTEM:-}" "$ip"; then system="$root/nix/store/11111111111111111111111111111111-nixos-system-other"; fi
     rm -rf "$root"
     mkdir -p "$root/etc" "$root/run" "$system"
     printf 'ID=nixos\nVARIANT_ID=""\n' > "$root/etc/os-release"
@@ -165,8 +176,9 @@ let
     incus.enable = true;
     incus.cluster.enable = true;
 
-    # Short, so the hang case finishes quickly.
+    # Short, so the hang and no-comeback cases finish quickly.
     converge.installTimeoutSeconds = 3;
+    converge.rebootTimeoutSeconds = 4;
 
     members.node-1 = { install.ip = "10.0.0.1"; k3s.role = "server"; };
     members.node-2 = { install.ip = "10.0.0.2"; k3s.role = "server"; };

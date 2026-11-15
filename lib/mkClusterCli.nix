@@ -452,7 +452,7 @@ let
         in
         pkgs.writeShellApplication {
           name = "nixclusterctl-${clusterName}-converge";
-          runtimeInputs = with pkgs; [ nixos-anywhere nixos-rebuild openssh jq coreutils ];
+          runtimeInputs = with pkgs; [ nixos-anywhere nixos-rebuild nix openssh jq coreutils ];
           text = ''
             set -euo pipefail
 
@@ -507,14 +507,35 @@ let
             # the host to go down. timeout exits 124 when it stops it.
             INSTALL_TIMEOUT=${toString cluster.converge.installTimeoutSeconds}
 
+            REBOOT_TIMEOUT=${toString cluster.converge.rebootTimeoutSeconds}
+            NIX_FLAGS=(--extra-experimental-features "nix-command flakes")
+
+            # After an install the member reboots into its new system;
+            # nixos-anywhere returns before it is back. Waits until it answers
+            # SSH with /run/current-system on the expected system. Sets SEEN to
+            # what it last reported.
+            wait_for_member() { # ip expected-system
+              local ip="$1" expected="$2" deadline now
+              deadline=$(( $(date +%s) + REBOOT_TIMEOUT ))
+              SEEN=""
+              while :; do
+                SEEN=$(ssh "''${SSH_OPTS[@]}" -o BatchMode=yes "root@$ip" 'readlink -f /run/current-system' \
+                  </dev/null 2>/dev/null || true)
+                [[ "$SEEN" == "$expected" ]] && return 0
+                now=$(date +%s)
+                (( now < deadline )) || return 1
+                sleep $(( deadline - now < 5 ? deadline - now : 5 ))
+              done
+            }
+
             install_member() { # member ip start
-              local member="$1" ip="$2" start="$3" end rc=0
+              local member="$1" ip="$2" start="$3" end rc=0 expected
               log "=== install $member ($ip) [nixos-anywhere, at most ''${INSTALL_TIMEOUT}s] ==="
               timeout --kill-after=30 "$INSTALL_TIMEOUT" \
                 nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}" || rc=$?
               end=$(date +%s)
               case "$rc" in
-                0) add_member "$member" "$ip" install Applied "" $((end - start)) ;;
+                0) ;;
                 124|137)
                   log "  [member] $member: nixos-anywhere timed out after ''${INSTALL_TIMEOUT}s"
                   add_member "$member" "$ip" install Failed "nixos-anywhere timed out after ''${INSTALL_TIMEOUT}s" $((end - start))
@@ -523,6 +544,27 @@ let
                   add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
                   return 1 ;;
               esac
+
+              # nixos-anywhere just built it, so this is a lookup, not a build.
+              if ! expected=$(nix "''${NIX_FLAGS[@]}" build --no-link --print-out-paths \
+                ".#nixosConfigurations.\"${clusterName}-$member\".config.system.build.toplevel"); then
+                end=$(date +%s)
+                add_member "$member" "$ip" install Failed "installed, but its system path could not be resolved" $((end - start))
+                return 1
+              fi
+              log "  [member] $member: waiting up to ''${REBOOT_TIMEOUT}s for it to come back on $expected"
+              if ! wait_for_member "$ip" "$expected"; then
+                end=$(date +%s)
+                if [[ -z "$SEEN" ]]; then
+                  add_member "$member" "$ip" install Failed "installed, but did not come back over SSH within ''${REBOOT_TIMEOUT}s" $((end - start))
+                else
+                  add_member "$member" "$ip" install Failed "installed, but it runs $SEEN instead of $expected" $((end - start))
+                fi
+                return 1
+              fi
+              log "  [member] $member is back on $expected"
+              end=$(date +%s)
+              add_member "$member" "$ip" install Applied "" $((end - start))
             }
 
             # Installs or switches one member. Returns non-zero only when the

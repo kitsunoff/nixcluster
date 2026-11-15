@@ -115,6 +115,10 @@ that fails to install or switch counts as a failed step the same way.
 An install is bounded by `converge.installTimeoutSeconds` (default 3600):
 nixos-anywhere can wait forever for a host that does not seem to go down after
 kexec, and the timeout turns that into a failed member instead of a stuck run.
+After the install, converge waits (`converge.rebootTimeoutSeconds`, default
+900) until the member answers SSH again with `/run/current-system` on the
+system it just installed, so the steps after it — joining a cluster, fetching
+a kubeconfig — do not run against a rebooting host.
 
 `preSteps` / `postSteps` still exist as sugar over the same attrset, carrying the
 dependencies their names implied.
