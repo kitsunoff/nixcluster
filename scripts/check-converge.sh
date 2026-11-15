@@ -292,5 +292,37 @@ expect_eq "the plan covers every step" "incus.cluster-join incus.prune incus.rec
   "$(jq_result '[.steps[] | .name] | sort | join(" ")')"
 expect_eq "a plan is a success, not a partial run" "success" "$(jq_result '.result')"
 
+printf '\n==> sops.gen, the converge pre-step that fills the secrets file\n'
+# It runs on every converge. The file is committed, so rewriting it when no key
+# is missing turns every converge into a diff.
+build_gen() {
+  "${NIX[@]}" build --impure --no-link --print-out-paths \
+    --file "$REPO_ROOT/scripts/converge-stubs.nix" --argstr repoRoot "$REPO_ROOT" "$1" 2>/dev/null | tail -n 1 || true
+}
+GEN="$(build_gen sopsGen)/bin/nixclusterctl-vault-gen-secrets"
+GEN_MORE="$(build_gen sopsGenMore)/bin/nixclusterctl-vault-gen-secrets"
+if [[ ! -x "$GEN" || ! -x "$GEN_MORE" ]]; then
+  fail "could not build the sops gen commands"
+else
+  SOPS_DIR="$WORK_DIR/sops"
+  mkdir -p "$SOPS_DIR"
+  digest() {
+    local sum
+    sum="$(shasum --algorithm 256 "$SOPS_DIR/secrets/vault.yaml")"
+    printf '%s' "${sum%% *}"
+  }
+  (cd "$SOPS_DIR" && "$GEN") > "$WORK_DIR/gen1.log" 2>&1
+  expect_eq "the first run writes the secrets file" "true" \
+    "$([[ -s "$SOPS_DIR/secrets/vault.yaml" ]] && echo true || echo false)"
+  first="$(digest)"
+  (cd "$SOPS_DIR" && "$GEN") > "$WORK_DIR/gen2.log" 2>&1
+  expect_eq "a second run with nothing missing leaves the file byte for byte" "$first" "$(digest)"
+  expect_contains "and says so" "$WORK_DIR/gen2.log" "nothing to add"
+  (cd "$SOPS_DIR" && "$GEN_MORE") > "$WORK_DIR/gen3.log" 2>&1
+  expect_eq "a new provider secret is added" "true" \
+    "$([[ "$(digest)" != "$first" ]] && grep --quiet "set    .extra.token" "$WORK_DIR/gen3.log" && echo true || echo false)"
+  expect_contains "and the existing one is kept" "$WORK_DIR/gen3.log" "keep   .demo.token"
+fi
+
 printf '\n%d check(s) passed, %d failed\n' "$checks" "$failures"
 [[ "$failures" -eq 0 ]]

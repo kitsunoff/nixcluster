@@ -224,6 +224,10 @@ in
               SSH_PUB_KEY=$(cat "$SSH_PUB_FILE")
 
               # --- working plaintext (decrypt existing for merge, unless --force) ---
+              # CHANGED stays 0 while the decrypted content matches what is
+              # wanted: sops re-encrypts with a fresh data key and MAC every
+              # time, so writing an unchanged file would still change it.
+              CHANGED=0
               WORK=$(mktemp)
               # shellcheck disable=SC2064
               trap "rm -f '$WORK'" EXIT
@@ -232,10 +236,14 @@ in
                 sops --config "$SOPS_CONFIG" --decrypt "$SECRETS_FILE" > "$WORK"
               else
                 echo "{}" > "$WORK"
+                CHANGED=1
               fi
 
               # ssh public key (core data secret)
-              VAL="$SSH_PUB_KEY" yq -i '.ssh.publicKey = strenv(VAL)' "$WORK"
+              if [[ "$(yq '.ssh.publicKey // ""' "$WORK")" != "$SSH_PUB_KEY" ]]; then
+                VAL="$SSH_PUB_KEY" yq -i '.ssh.publicKey = strenv(VAL)' "$WORK"
+                CHANGED=1
+              fi
 
               # ensure_secret <dotpath> <generator-fn>: set only if missing (or --force)
               ensure_secret() {
@@ -249,17 +257,22 @@ in
                 fi
                 val=$("$fn")
                 VAL="$val" yq -i "$dotpath = strenv(VAL)" "$WORK"
+                CHANGED=1
                 echo "  set    $dotpath"
               }
 
               echo "[providers] collecting secrets"
               ${secretShell}
 
-              # --- encrypt ---
-              echo "[encrypt] writing $SECRETS_FILE"
-              ENCRYPTED_FILE=$(mktemp)
-              sops --config "$SOPS_CONFIG" --filename-override "$SECRETS_FILE" --encrypt "$WORK" > "$ENCRYPTED_FILE"
-              mv "$ENCRYPTED_FILE" "$SECRETS_FILE"
+              # --- encrypt, only when something was added ---
+              if [[ "$CHANGED" -eq 1 ]]; then
+                echo "[encrypt] writing $SECRETS_FILE"
+                ENCRYPTED_FILE=$(mktemp)
+                sops --config "$SOPS_CONFIG" --filename-override "$SECRETS_FILE" --encrypt "$WORK" > "$ENCRYPTED_FILE"
+                mv "$ENCRYPTED_FILE" "$SECRETS_FILE"
+              else
+                echo "[encrypt] nothing to add; $SECRETS_FILE left as it is"
+              fi
 
               echo ""
               echo "Secrets ready: $SECRETS_FILE (encrypted, safe to commit)"

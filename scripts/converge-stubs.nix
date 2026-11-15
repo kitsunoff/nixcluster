@@ -29,7 +29,9 @@
 #                       (a number, not a file; 0 when unset)
 #
 # Attributes:
-#   converge  the built `converge` command (bin/nixclusterctl-lab-converge)
+#   converge     the built `converge` command (bin/nixclusterctl-lab-converge)
+#   sopsGen      the real `sops gen` of a cluster with one provider secret
+#   sopsGenMore  the same after a second provider was added
 #   systemOf  member -> the system path the stubbed `nix build` reports for it
 { repoRoot }:
 
@@ -183,8 +185,23 @@ let
     members.node-1 = { install.ip = "10.0.0.1"; k3s.role = "server"; };
     members.node-2 = { install.ip = "10.0.0.2"; k3s.role = "server"; };
   };
+  # The real `sops gen` (real age, sops and yq: it only touches files in the
+  # directory it runs in) of a cluster with one provider secret, and of the
+  # same cluster after a second provider was added.
+  sopsGenOf = providers: (flake.lib.mkCluster {
+    imports = [ flake.clusterModules.sops ];
+    name = "vault";
+    sops.enable = true;
+    sops.providers = providers;
+  }).config.commandGroups.sops.actions.gen.builder { inherit pkgs; cluster = { sops.providers = providers; }; };
+  oneProvider = { demo.generate = _: { "demo/token" = "head -c 12 /dev/urandom | base64"; }; };
 in
 {
+  sopsGen = sopsGenOf oneProvider;
+  sopsGenMore = sopsGenOf (oneProvider // {
+    extra.generate = _: { "extra/token" = "head -c 12 /dev/urandom | base64"; };
+  });
+
   converge = (cluster.cli stubbedPkgs).passthru.commands.converge;
   inherit systemOf;
   order = cluster.convergeOrder;

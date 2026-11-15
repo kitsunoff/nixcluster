@@ -183,7 +183,7 @@ Nothing is auto-applied: a cluster imports what it wants.
 | --- | --- |
 | `k3s` | k3s on every member, roles from `k3s.role`, the ordering contract above, kubeconfig fetch, node/manifest/helm commands, and a prune step |
 | `incus` | Incus on every member; with `incus.cluster.enable`, runtime join tokens for members that never set a per-member patch, plus a prune step. `incus.virtualMachines = false` runs containers only and keeps qemu and the UEFI firmware out of the closure (for hosts without nested KVM) |
-| `sops` | age-encrypted cluster secrets, generate-if-missing, delivered to hosts outside the Nix store. Members decrypt `secrets/<cluster>.yaml` from the flake (`sops.secretsFile`; commit the file so the flake contains it) |
+| `sops` | age-encrypted cluster secrets, generate-if-missing (a run with nothing missing leaves the file untouched), delivered to hosts outside the Nix store. Members decrypt `secrets/<cluster>.yaml` from the flake (`sops.secretsFile`; commit the file so the flake contains it) |
 | `nebula` | a Nebula mesh with a per-cluster CA and per-member certificates |
 | `keepalived` | VRRP virtual addresses across members |
 | `disko` | declarative partitioning for the install step |
