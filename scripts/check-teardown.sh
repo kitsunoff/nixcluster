@@ -76,14 +76,29 @@ expect_eq() {
 # containing <first-needle> comes before the first containing <second-needle>.
 expect_before() {
   local a b
-  a="$(grep --line-number --fixed-strings --regexp="$3" -- "$2" | head -n 1)"
-  b="$(grep --line-number --fixed-strings --regexp="$4" -- "$2" | head -n 1)"
+  a="$(grep --line-number --fixed-strings --regexp="$3" -- "$2" | head -n 1 || true)"
+  b="$(grep --line-number --fixed-strings --regexp="$4" -- "$2" | head -n 1 || true)"
   a="${a%%:*}"
   b="${b%%:*}"
   if [[ -n "$a" && -n "$b" && "$a" -lt "$b" ]]; then
     ok "$1"
   else
     fail "$1: '$3' (line ${a:-none}) is not before '$4' (line ${b:-none})"
+  fi
+}
+
+# expect_all_before <what> <file> <first-needle> <second-needle>: the LAST line
+# containing <first-needle> comes before the first containing <second-needle>.
+expect_all_before() {
+  local a b
+  a="$(grep --line-number --fixed-strings --regexp="$3" -- "$2" | tail -n 1 || true)"
+  b="$(grep --line-number --fixed-strings --regexp="$4" -- "$2" | head -n 1 || true)"
+  a="${a%%:*}"
+  b="${b%%:*}"
+  if [[ -n "$a" && -n "$b" && "$a" -lt "$b" ]]; then
+    ok "$1"
+  else
+    fail "$1: the last '$3' (line ${a:-none}) is not before '$4' (line ${b:-none})"
   fi
 }
 
@@ -262,7 +277,7 @@ expect_contains "the base configuration is built" "$STUB_CALLS" 'teardownNixosCo
 expect_contains "and copied to the member" "$STUB_CALLS" "copy --to ssh://root@10.0.0.1"
 expect_contains "and switched to" "$STUB_CALLS" "bin/switch-to-configuration switch"
 expect_before "the agent leaves before the bootstrap" "$STUB_CALLS" "drain node-4" "copy --to ssh://root@10.0.0.4"
-expect_before "the last member leaves before any cleanup" "$STUB_CALLS" "incus cluster remove 'node-2'" "remove_paths /etc/rancher"
+expect_all_before "every Incus joiner is removed before any cleanup" "$STUB_CALLS" "incus cluster remove" "remove_paths /etc/rancher"
 expect_before "members are switched back last-converged first" "$STUB_CALLS" "copy --to ssh://root@10.0.0.4" "copy --to ssh://root@10.0.0.1"
 
 printf '\n  the result contract\n'
