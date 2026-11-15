@@ -25,6 +25,12 @@ Describe a cluster once — members, roles, modules — and `converge` installs 
 > `install.disk` before the first run.
 
 > [!IMPORTANT]
+> A host needs **at least 3 GiB of RAM** to be installed. nixos-anywhere boots a
+> kexec installer that unpacks into memory; with 2 GiB it fails with
+> `kexec_file_load failed: Out of memory`. A smaller host can be installed by
+> giving it more memory for the install only.
+
+> [!IMPORTANT]
 > Removing a member from the cluster definition now **removes it from the
 > cluster** — that is the point of two-way reconciliation. The guards are real
 > (an empty member set refuses to prune anything, and a removal that would break

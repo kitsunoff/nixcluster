@@ -34,6 +34,12 @@ modules/
 > First-time installation runs `nixos-anywhere`, which **wipes the target disk**.
 > Verify `install.ip` and `install.disk` before converging.
 
+> [!IMPORTANT]
+> The installer needs **at least 3 GiB of RAM** on the target. nixos-anywhere
+> boots a kexec image that unpacks into memory; with 2 GiB it fails with
+> `kexec_file_load failed: Out of memory`. A smaller host can be installed by
+> giving it more memory for the install only.
+
 ## Use it
 
 ```bash
