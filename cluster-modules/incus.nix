@@ -16,6 +16,9 @@
 { lib, config, ... }:
 
 let
+  # The ssh options every nixcluster command shares (lib/ssh.nix).
+  sshLib = import ../lib/ssh.nix { inherit lib; };
+
   cfg = config.incus;
   clusterName = config.name;
 
@@ -69,8 +72,7 @@ let
       local node="$1"; shift
       local ip; ip="$(node_ip "$node")"
       if [ -z "$ip" ]; then echo "no install.ip for node '$node'" >&2; return 1; fi
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=5 "root@$ip" "$@"
+      ssh ${sshLib.shellArgs} "root@$ip" "$@"
     }
   '';
 
@@ -103,8 +105,7 @@ let
     # as POSITIONALS via stdin, so a member name is never spliced into a command
     # string that the local shell expands.
     incus_on_bootstrap() {
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=10 -o BatchMode=yes "root@$BOOTSTRAP_IP" \
+      ssh ${sshLib.shellArgs} -o BatchMode=yes "root@$BOOTSTRAP_IP" \
         'sh -s' -- "$@" <<'REMOTE'
     incus "$@"
     REMOTE

@@ -237,6 +237,18 @@ combined log (a Kubernetes Job's pod log, for example) still finds the marker.
 `steps` lists every step in the order it ran, the `member-<name>` steps
 included; `members` adds the per-member detail (action, address, duration).
 
+### SSH
+
+Every command reaches members with one set of ssh options (`lib/ssh.nix`): no
+host-key checking and nothing written to `known_hosts` (a reinstall changes the
+host key), `LogLevel=ERROR`, a 10-second connect timeout, and a client config
+that includes only `~/.ssh/config`. The system-wide `/etc/ssh/ssh_config` is
+skipped on purpose: it is written for the host's ssh, and an option the Nix
+store's ssh does not support (`GSSAPIAuthentication` on most distributions)
+prints an error on every connection. Put anything nixcluster's ssh needs, such
+as a `ProxyJump`, in `~/.ssh/config`. `gen-config` is the exception: it pins the
+host key of a machine it sees for the first time.
+
 ## Checks
 
 All of them run in CI on every push and pull request. None of them builds a NixOS

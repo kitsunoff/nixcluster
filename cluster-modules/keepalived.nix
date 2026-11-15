@@ -15,6 +15,9 @@
 { lib, config, options, ... }:
 
 let
+  # The ssh options every nixcluster command shares (lib/ssh.nix).
+  sshLib = import ../lib/ssh.nix { inherit lib; };
+
   cfg = config.keepalived;
   clusterName = config.name;
 
@@ -78,8 +81,7 @@ let
       # No host-key pinning, consistent with the incus/nebula converge preludes
       # (converge reinstalls nodes → host key changes). Identity comes from the
       # cluster key installed by the converge preamble.
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=5 "root@$ip" "$@"
+      ssh ${sshLib.shellArgs} "root@$ip" "$@"
     }
   '';
 

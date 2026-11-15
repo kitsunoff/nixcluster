@@ -125,7 +125,7 @@ let
   '';
 
   stubRebuild = pkgs.writeShellScriptBin "nixos-rebuild" ''
-    printf '%s\n' "nixos-rebuild $*" >> "$STUB_CALLS"
+    printf '%s\n' "nixos-rebuild $* NIX_SSHOPTS=''${NIX_SSHOPTS:-}" >> "$STUB_CALLS"
   '';
 
   stubNix = pkgs.writeShellScriptBin "nix" ''

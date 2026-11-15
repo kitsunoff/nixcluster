@@ -113,6 +113,22 @@ $(indent "$STUB_CALLS")"
   fi
 }
 
+# expect_every_ssh_call <what>: every recorded ssh/scp invocation (and every
+# NIX_SSHOPTS handed to nix or nixos-rebuild) uses nixcluster's shared ssh
+# options: no host-key prompt or banner, no known_hosts entry, and the
+# system-wide ssh_config skipped (its options can be unsupported by this ssh).
+expect_every_ssh_call() {
+  local bad
+  bad="$(grep --extended-regexp '^(ssh|scp) |NIX_SSHOPTS=' "$STUB_CALLS" | grep --invert-match --extended-regexp \
+    -e '-F /nix/store/[a-z0-9]+-nixcluster-ssh-config .*StrictHostKeyChecking=no .*UserKnownHostsFile=/dev/null .*LogLevel=ERROR' || true)"
+  if [[ -z "$bad" ]] && grep --quiet --extended-regexp '^(ssh|scp) ' "$STUB_CALLS"; then
+    ok "$1"
+  else
+    fail "$1; calls without the shared options:
+$(printf '%s\n' "$bad" | sed 's/^/        /')"
+  fi
+}
+
 # result_json: the payload of the single ::nixcluster:result:: line on stdout.
 result_json() {
   local line
@@ -315,6 +331,7 @@ expect_absent "the age key is kept, so a later converge can decrypt again" "$STU
 expect_contains "the base configuration is built" "$STUB_CALLS" 'teardownNixosConfigurations."node-1"'
 expect_contains "and copied to the member" "$STUB_CALLS" "copy --to ssh://root@10.0.0.1"
 expect_contains "and switched to" "$STUB_CALLS" "bin/switch-to-configuration switch"
+expect_every_ssh_call "every ssh and nix copy uses the shared ssh options"
 expect_before "the agent leaves before the bootstrap" "$STUB_CALLS" "drain node-4" "copy --to ssh://root@10.0.0.4"
 expect_all_before "every Incus joiner is removed before any cleanup" "$STUB_CALLS" "incus cluster remove" "remove_paths /etc/rancher"
 expect_before "members are switched back last-converged first" "$STUB_CALLS" "copy --to ssh://root@10.0.0.4" "copy --to ssh://root@10.0.0.1"

@@ -16,6 +16,7 @@
 
 let
   stepPlan = import ./stepPlan.nix { inherit lib; };
+  sshLib = import ./ssh.nix { inherit lib; };
 
   clusterName = cluster.name;
   memberNames = lib.attrNames cluster.members;
@@ -103,12 +104,10 @@ let
                 <<<"$STEPS_JSON")
             }
 
-            # No host-key pinning on the converge path: converge reinstalls
-            # members (nixos-anywhere), which CHANGES their ssh host key mid-run,
-            # so accept-new (which rejects a *changed* key) would fail every
-            # post-install step. Matches the operator-injected NIX_SSHOPTS, which
-            # also disables host-key checking for exactly this reason.
-            SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+            # The ssh options every step shares (lib/ssh.nix): no host-key
+            # pinning, because converge reinstalls members (nixos-anywhere),
+            # which CHANGES their ssh host key mid-run.
+            SSH_OPTS=(${sshLib.shellArgs})
 
             # The operator passes the cluster SSH key via NIX_SSHOPTS ("-i <path>
             # ..."), but plain ssh (the member probe below) and the module steps

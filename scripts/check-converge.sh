@@ -74,6 +74,22 @@ $(indent "$STUB_CALLS")"
   fi
 }
 
+# expect_every_ssh_call <what>: every recorded ssh/scp invocation (and every
+# NIX_SSHOPTS handed to nix or nixos-rebuild) uses nixcluster's shared ssh
+# options: no host-key prompt or banner, no known_hosts entry, and the
+# system-wide ssh_config skipped (its options can be unsupported by this ssh).
+expect_every_ssh_call() {
+  local bad
+  bad="$(grep --extended-regexp '^(ssh|scp) |NIX_SSHOPTS=' "$STUB_CALLS" | grep --invert-match --extended-regexp \
+    -e '-F /nix/store/[a-z0-9]+-nixcluster-ssh-config .*StrictHostKeyChecking=no .*UserKnownHostsFile=/dev/null .*LogLevel=ERROR' || true)"
+  if [[ -z "$bad" ]] && grep --quiet --extended-regexp '^(ssh|scp) ' "$STUB_CALLS"; then
+    ok "$1"
+  else
+    fail "$1; calls without the shared options:
+$(printf '%s\n' "$bad" | sed 's/^/        /')"
+  fi
+}
+
 # result_json: the payload of the ::nixcluster:result:: line on stdout.
 result_json() {
   local line
@@ -163,6 +179,8 @@ expect_absent "nothing is installed" "$STUB_CALLS" "nixos-anywhere"
 expect_eq "every step is reported in plan order, member steps included" \
   "$("${NIX[@]}" eval --impure --raw --file "$REPO_ROOT/scripts/converge-stubs.nix" --argstr repoRoot "$REPO_ROOT" order --apply 'builtins.concatStringsSep " "')" \
   "$(jq_result '.steps | map(.name) | join(" ")')"
+expect_every_ssh_call "every ssh, scp and nixos-rebuild call uses the shared ssh options"
+expect_contains "the kubeconfig is fetched with them too" "$STUB_CALLS" "scp -F "
 expect_eq "member steps carry the member phase and succeeded" "member:ok member:ok" \
   "$(jq_result '[.steps[] | select(.name | startswith("member-")) | "\(.phase):\(.status)"] | join(" ")')"
 
