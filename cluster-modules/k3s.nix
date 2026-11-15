@@ -132,6 +132,100 @@ let
     }
   '';
 
+  # --- teardown ---------------------------------------------------------------
+  # The reverse of the converge contract above (lib/teardown.nix holds the
+  # shape): every node is cordoned and drained, agents leave before the servers
+  # they joined and the bootstrap server leaves last, then each host loses its
+  # k3s state. A leaving joiner server takes its etcd member with it, so the
+  # control plane shrinks instead of losing quorum.
+  teardownLib = import ../lib/teardown.nix { inherit lib; };
+
+  # kubectl against the kubeconfig the k3s.drain step fetched, bounded so a
+  # control plane that is already gone cannot hold the run.
+  teardownKubectlPrelude = ''
+    export KUBECONFIG="kubeconfig/${clusterName}.yaml"
+    kube() { kubectl --request-timeout=20s "$@"; }
+    log() { echo "[k3s] $*" >&2; }
+  '';
+
+  teardownDrain = args@{ pkgs, ... }:
+    pkgs.writeShellApplication {
+      name = "nixcluster-teardown-k3s-drain";
+      runtimeInputs = with pkgs; [ kubectl coreutils ];
+      text = ''
+        ${teardownKubectlPrelude}
+        if ! ${lib.getExe (k3sCommands.kubeconfig.builder args)} fetch >&2; then
+          log "could not fetch a kubeconfig from ${toString firstServer}; nothing to drain"
+          exit 0
+        fi
+        NODES=(${lib.concatStringsSep " " (map lib.escapeShellArg desiredNodeNames)})
+        for node in "''${NODES[@]}"; do
+          kube cordon "$node" >&2 || log "could not cordon $node; continuing"
+        done
+        # Nothing can be rescheduled any more, so pods are deleted rather than
+        # evicted (a PodDisruptionBudget must not hold a teardown open).
+        for node in "''${NODES[@]}"; do
+          kube drain "$node" \
+            --ignore-daemonsets \
+            --delete-emptydir-data \
+            --disable-eviction \
+            --force \
+            --timeout=${toString cfg.prune.drainTimeoutSeconds}s >&2 ||
+            log "drain of $node did not finish cleanly; continuing"
+        done
+      '';
+    };
+
+  # A member leaves: deregistered through the API while it still answers (a
+  # joiner server also leaves etcd), then its k3s unit is stopped on the host.
+  # The bootstrap server is not deregistered — it is the last one, nothing is
+  # left to deregister it from.
+  teardownLeave = member: { pkgs, ... }:
+    let
+      node = config.memberRegistryNames.${member};
+      isJoinerServer = lib.elem member servers && member != firstServer;
+    in
+    pkgs.writeShellApplication {
+      name = "nixcluster-teardown-k3s-leave-${member}";
+      runtimeInputs = with pkgs; [ kubectl ];
+      text = ''
+        ${teardownKubectlPrelude}
+        ${lib.optionalString (member != firstServer) ''
+          if [[ -f "$KUBECONFIG" ]]; then
+            ${lib.optionalString isJoinerServer ''
+              kube annotate node ${lib.escapeShellArg node} etcd.k3s.cattle.io/remove=true --overwrite >&2 ||
+                log "could not annotate ${node} for etcd removal; continuing"
+            ''}
+            kube delete node ${lib.escapeShellArg node} --ignore-not-found --wait=false >&2 ||
+              log "could not delete the Node ${node}; continuing"
+          fi
+        ''}
+        exec ${lib.getExe (teardownLib.mkHostStep {
+          inherit pkgs member;
+          name = "k3s.leave";
+          ip = config.members.${member}.install.ip or null;
+          script = "stop_unit k3s.service";
+        })}
+      '';
+    };
+
+  # NixOS has no k3s-uninstall.sh; this is its host-side half. k3s-killall.sh
+  # (shipped by the nixpkgs k3s package) stops the containers the unit leaves
+  # behind (KillMode=process), unmounts their volumes and removes the CNI links
+  # and iptables rules; then the data and config go.
+  teardownCleanup = member: { pkgs, ... }: teardownLib.mkHostStep {
+    inherit pkgs member;
+    name = "k3s.cleanup";
+    ip = config.members.${member}.install.ip or null;
+    script = ''
+      stop_unit k3s.service
+      if command -v k3s-killall.sh >/dev/null 2>&1; then
+        k3s-killall.sh >/dev/null 2>&1 || true
+      fi
+      remove_paths /etc/rancher /var/lib/rancher /var/lib/kubelet /var/lib/cni /run/k3s /run/flannel
+    '';
+  };
+
   pruneProbeHost = ''
     ssh_reachable "$1" >/dev/null 2>&1
   '';
@@ -341,6 +435,33 @@ in
         // lib.listToAttrs (map
           (agent: lib.nameValuePair (memberStepName agent) { deps = serverSteps; })
           agents)
+      );
+
+      # teardown DAG: converge in reverse (see the teardown section above).
+      teardown.steps = lib.mkIf (allK3sMembers != []) (
+        {
+          "k3s.drain" = {
+            description = "Cordon and drain every k3s node";
+            phase = "workloads";
+            priority = teardownLib.bands.workloads;
+            run = teardownDrain;
+          };
+        }
+        // teardownLib.mkModuleSteps {
+          cluster = config;
+          module = "k3s";
+          members = allK3sMembers;
+          offset = 0;
+          after = [ "k3s.drain" ];
+          leave = member: {
+            description = "${member} leaves the k3s cluster and stops k3s";
+            run = teardownLeave member;
+          };
+          cleanup = member: {
+            description = "Remove k3s containers, data and config from ${member}";
+            run = teardownCleanup member;
+          };
+        }
       );
     }
 
