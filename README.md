@@ -27,12 +27,17 @@ Describe a cluster once — members, roles, modules — and `converge` installs 
 > cluster** — that is the point of two-way reconciliation. The guards are real
 > (an empty member set refuses to prune anything, and a removal that would break
 > quorum is refused), but a deliberate deletion is carried out.
+>
+> `converge` never dissolves a whole cluster: emptying the definition is
+> refused. Dissolving it is a separate command, [`teardown`](#teardown), which
+> shows its plan and acts only on an explicit `yes`.
 
 ## Table of contents
 
 - [What you get](#what-you-get)
 - [Start from a scenario template](#start-from-a-scenario-template)
 - [How converge orders itself](#how-converge-orders-itself)
+- [Teardown](#teardown)
 - [Cluster modules](#cluster-modules)
 - [Writing a cluster by hand](#writing-a-cluster-by-hand)
 - [CLI](#cli)
@@ -51,6 +56,7 @@ Describe a cluster once — members, roles, modules — and `converge` installs 
 | **Converge** | A dependency graph, not a fixed pipeline: secrets before members, non-first servers after the bootstrap, agents after **all** servers, post-ops after the members they need. |
 | **Join** | Module-specific runtime work that a NixOS switch cannot do: minting Incus join tokens, fetching a kubeconfig. Idempotent — an already-joined member is skipped and says so. |
 | **Prune** | Members that left the definition are drained, deregistered and removed from the cluster's own registry. Reported as `action: "removed"` in the result JSON. |
+| **Teardown** | The whole cluster is dissolved, converge in reverse: workloads off, members leave, module state is removed, and every member is switched back to its base NixOS configuration. Reported as `action: "destroyed"`. |
 
 ## Start from a scenario template
 
@@ -106,6 +112,58 @@ bootstrap does not drag the agents through a pointless join attempt.
 `preSteps` / `postSteps` still exist as sugar over the same attrset, carrying the
 dependencies their names implied.
 
+## Teardown
+
+`converge` handles the members that left the definition (prune).
+`teardown` removes the cluster from every member that is still in the
+definition. The machines stay installed, keep their disk layout and still answer
+SSH, so a later `converge` can rebuild the cluster on them.
+
+```bash
+nix run .#cluster-k3s-ha -- teardown --dry-run       # plan only, nothing touched
+nix run .#cluster-k3s-ha -- teardown                 # shows the plan, asks for "yes"
+nix run .#cluster-k3s-ha -- teardown --auto-approve  # no prompt (automation)
+```
+
+The plan is `converge` in reverse, built from the same dependency graph, and
+`scripts/check-templates.sh` checks that property for every template:
+
+1. **Workloads off.** Cluster-wide steps: `k3s.drain` cordons and drains every
+   node, and `incus.instances-off` deletes every instance.
+2. **Leave.** `<module>.leave-<member>`: each member leaves the module's cluster.
+   Members leave in the reverse of the order converge brought them up in, so
+   joiners leave before the bootstrap they joined.
+3. **Cleanup.** `<module>.cleanup-<member>`: the module's units, data and runtime
+   secrets are removed from the host. For a module with a leave phase (`k3s`,
+   `incus`), cleanup starts only after every member of that module has left.
+4. **Switch back.** `member-<member>`: the member is switched to its base NixOS
+   configuration — its own `nixosConfiguration` or the cluster's
+   `defaultNixosConfiguration` plus its member patches (host name, network),
+   without what the cluster modules generate. Patches may still set
+   cluster-module options such as `k3s.role`: those modules are loaded
+   options-only. The disk layout from `disko` is kept, and no sops secret is
+   decrypted. The base is published as
+   `clusterConfigurations.<name>.teardownNixosConfigurations.<member>`.
+
+```text
+$ nix eval .#clusterConfigurations.k3s-ha.teardownOrder
+["k3s.drain","k3s.leave-agent-2","k3s.leave-agent-1","k3s.leave-server-3","k3s.leave-server-2","k3s.leave-server-1","k3s.cleanup-agent-2","k3s.cleanup-agent-1","k3s.cleanup-server-3","k3s.cleanup-server-2","k3s.cleanup-server-1","member-agent-2","member-agent-1","member-server-3","member-server-2","member-server-1"]
+```
+
+What each module removes:
+
+| Module | Leave | Cleanup |
+| --- | --- | --- |
+| `k3s` | a joining server gives up its etcd member; the Node is deleted; k3s stops | containers, `/etc/rancher`, `/var/lib/rancher`, kubelet and CNI state |
+| `incus` | a joiner is removed through the bootstrap; Incus stops | Incus units, `incusbr*` bridges, `/var/lib/incus`, `/var/log/incus`, `/var/cache/incus` |
+| `keepalived` | — | keepalived stops (its VIPs are released); `/run/keepalived` |
+| `nebula` | — | `nebula@<network>.service` stops |
+| `sops` | — | decrypted secrets under `/run`; the age key stays, so a later converge can decrypt again |
+
+Every host step is safe to run again, so a teardown that stopped halfway can be
+repeated. A member that does not answer SSH is reported as `Skipped` and its
+state is left as it is; the result is then `partial`, not a failure.
+
 ## Cluster modules
 
 Nothing is auto-applied: a cluster imports what it wants.
@@ -150,13 +208,14 @@ nixcluster.prod =
 ```bash
 nix run .#cluster-prod -- --help
 nix run .#cluster-prod -- converge [--dry-run] [--json] [--age-key-file path]
+nix run .#cluster-prod -- teardown [--dry-run] [--json] [--auto-approve]
 nix run .#cluster-prod -- apply node-1          # switch one member
 nix run .#cluster-prod -- install node-1        # first-time provisioning
 nix run .#cluster-prod -- gen-config 10.0.0.12  # SSH-discover a node, emit a member file
 nix run .#cluster-prod -- k3s nodes             # module command groups
 ```
 
-`converge` writes human output to stderr and exactly one machine-readable line to
+`converge` and `teardown` write human output to stderr and exactly one machine-readable line to
 stdout, so a consumer gets a single marker to grep:
 
 ```text
@@ -168,14 +227,18 @@ stdout, so a consumer gets a single marker to grep:
 
 ## Checks
 
-Both are evaluation-only and run in CI on every push and pull request.
+All three run in CI on every push and pull request. None of them builds a NixOS
+system or touches a host.
 
 ```text
 $ scripts/check-templates.sh
-24 check(s) passed, 0 failed
+32 check(s) passed, 0 failed
 
 $ scripts/check-prune.sh
 38 check(s) passed, 0 failed
+
+$ scripts/check-teardown.sh
+88 check(s) passed, 0 failed
 ```
 
 `check-templates.sh` locks every registered template against the checkout and
@@ -184,12 +247,20 @@ app, the resolved converge order, and the converge steps **with their
 dependencies** — so a template whose plan drifts from its documented contract
 fails loudly. It also evaluates every member's `system.build.toplevel`, which
 catches option and type errors across the whole configuration, while building
-nothing.
+nothing. Finally, it checks each template's teardown order and that the teardown
+plan is its converge plan in reverse.
 
 `check-prune.sh` covers the only part of converge that deletes things: the engine's
 branches against an injected registry (no-op, one stale member, unreachable host →
 force path, empty desired set → loud refusal with nothing removed, quorum-breaking
 removal → refused) and the real k3s step against stubbed `kubectl` and `ssh`.
+
+`check-teardown.sh` covers the command that removes a whole cluster: the exact
+plan of a cluster that loads every module with teardown steps, the disk layout
+surviving the switch back, and the real `teardown` command against stubbed
+`ssh`, `kubectl` and `nix` — the `yes` prompt and every refusal, `--dry-run`,
+`--auto-approve`, an unreachable member, a member that fails to switch, and the
+result JSON.
 
 ## Architecture
 
@@ -203,14 +274,18 @@ nixcluster.<name>                     one definition (merged across ./modules by
 clusterConfigurations.<name>
   ├─ nixosConfigurations.<name>-<member>     one per member
   ├─ convergeOrder                           resolved topological plan
+  ├─ teardownOrder                           the same, for `teardown`
+  ├─ teardownNixosConfigurations.<member>    what teardown switches a member to
   └─ cli  →  apps.<system>.cluster-<name>    the per-cluster CLI
 ```
 
 Every unit of converge work — a module step *and* each member's install-or-switch —
-is a node in `converge.steps`. `lib/convergePlan.nix` topologically sorts them and
+is a node in `converge.steps`, and every unit of teardown work is a node in
+`teardown.steps`. `lib/stepPlan.nix` topologically sorts either graph and
 fails evaluation on an unknown dependency, a cycle, or a step that is neither a
 `run` nor a `member`. `lib/prune.nix` holds the registry-diff engine all pruning
-modules share, so the dangerous logic exists exactly once.
+modules share, so the dangerous logic exists exactly once. `lib/teardown.nix`
+gives every module the same four teardown phases for the same reason.
 
 ## Known limitations
 
@@ -223,7 +298,14 @@ modules share, so the dangerous logic exists exactly once.
   member, not a step-by-step trace.
 - **`converge` builds where it runs.** There is no `--build-host`, so driving it
   from a machine that cannot build the members' system needs a configured remote
-  builder.
+  builder. The same applies to `teardown`, which builds each member's base.
+- **Teardown has never run against a live cluster.** The plan and the command are
+  covered by evaluation and by stubbed tests only.
+- **Teardown fully resets only the default `dir` Incus storage pool.** Pools on
+  zfs, lvm or btrfs with a block-device source are not wiped.
+- **Teardown keeps member patches.** A patch that configures a service
+  directly (for example `services.k3s.*` instead of the module's `k3s.*`
+  options) stays active after teardown.
 
 ## License
 

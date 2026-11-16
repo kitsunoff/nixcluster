@@ -12,6 +12,8 @@
 #   3. apps.aarch64-linux.cluster-<cluster>             exists
 #   4. converge steps and their deps                   match the scenario contract
 #   5. every member's system.build.toplevel.drvPath     evaluates
+#   6. teardownOrder                                   matches the scenario contract
+#   7. the teardown plan reverses the converge plan    (scripts/teardown-roundtrip.jq)
 #
 # (5) is full NixOS module evaluation — it catches option and type errors across
 # the whole configuration — but it deliberately does NOT build anything.
@@ -70,6 +72,7 @@ eval_json() {
 #         EXPECT_CLUSTER[<template>]  = the cluster attribute name
 #         EXPECT_DEPS[<template>]     = "<step>:<dep>,<dep> <step>:<dep>" pairs,
 #                                       deps sorted; "-" means no dependencies
+#         EXPECT_TEARDOWN[<template>] = the resolved teardown order
 # ---------------------------------------------------------------------------
 declare -A EXPECT_CLUSTER=(
   [default]="example"
@@ -95,6 +98,16 @@ declare -A EXPECT_DEPS=(
   # The Incus contract: joiners wait for the bootstrap and not for each other;
   # the join/reconcile steps wait for every member.
   [incus-cluster]="member-node-1:- member-node-2:member-node-1 member-node-3:member-node-1 incus.cluster-join:member-node-1,member-node-2,member-node-3 incus.reconcile:member-node-1,member-node-2,member-node-3 incus.prune:incus.cluster-join,incus.reconcile,member-node-1,member-node-2,member-node-3"
+)
+
+# Teardown is converge in reverse: workloads off, then members leave last-joined
+# first (agents, then the joining servers, then the bootstrap), then each host is
+# cleaned up, then each member is switched back to its base configuration.
+declare -A EXPECT_TEARDOWN=(
+  [default]="k3s.drain k3s.leave-node1 k3s.cleanup-node1 member-node1"
+  [k3s-single]="k3s.drain k3s.leave-server-1 k3s.cleanup-server-1 member-server-1"
+  [k3s-ha]="k3s.drain k3s.leave-agent-2 k3s.leave-agent-1 k3s.leave-server-3 k3s.leave-server-2 k3s.leave-server-1 k3s.cleanup-agent-2 k3s.cleanup-agent-1 k3s.cleanup-server-3 k3s.cleanup-server-2 k3s.cleanup-server-1 member-agent-2 member-agent-1 member-server-3 member-server-2 member-server-1"
+  [incus-cluster]="incus.instances-off incus.leave-node-3 incus.leave-node-2 incus.leave-node-1 incus.cleanup-node-3 incus.cleanup-node-2 incus.cleanup-node-1 member-node-3 member-node-2 member-node-1"
 )
 
 # check_template <name>
@@ -187,6 +200,24 @@ $(printf '%s' "$order" | tail -n 5)"
     fi
   done
   assert_eq "member toplevels evaluate" "" "$uneval"
+
+  # 6. the teardown order — the reverse contract, spelled out per scenario.
+  local teardown
+  teardown="$("${NIX[@]}" eval --json "$dir#clusterConfigurations.$cluster.teardownOrder" 2>/dev/null |
+    "${NIX[@]}" run nixpkgs#jq -- --raw-output 'join(" ")' 2>/dev/null || echo "<eval failed>")"
+  assert_eq "teardownOrder" "${EXPECT_TEARDOWN[$name]}" "$teardown"
+
+  # 7. ...and the property behind it, checked against this template's own
+  # converge plan rather than against a list someone typed.
+  local roundtrip
+  roundtrip="$("${NIX[@]}" eval --json "$dir#clusterConfigurations.$cluster" --apply '
+      c: let deps = steps: builtins.mapAttrs (_: step: step.deps) steps; in {
+        converge = { order = c.convergeOrder; deps = deps c.config.converge.steps; };
+        teardown = { order = c.teardownOrder; deps = deps c.config.teardown.steps; };
+      }' 2>/dev/null |
+    "${NIX[@]}" run nixpkgs#jq -- --compact-output --from-file "$REPO_ROOT/scripts/teardown-roundtrip.jq" 2>/dev/null ||
+    echo "<eval failed>")"
+  assert_eq "teardown reverses converge" "[]" "$roundtrip"
 }
 
 # ---------------------------------------------------------------------------

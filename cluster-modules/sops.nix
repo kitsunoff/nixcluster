@@ -33,6 +33,21 @@ let
       };
     };
 
+  # --- teardown ---------------------------------------------------------------
+  # sops-nix decrypts into a ramfs under /run at activation; those secrets are
+  # removed. The age key (ageKeyFileOnHost) is KEPT, so a later converge of the
+  # same cluster can decrypt again without reinstalling. See lib/teardown.nix.
+  teardownLib = import ../lib/teardown.nix { inherit lib; };
+
+  teardownCleanup = member: { pkgs, ... }: teardownLib.mkHostStep {
+    inherit pkgs member;
+    name = "sops.cleanup";
+    ip = config.members.${member}.install.ip or null;
+    script = ''
+      remove_paths /run/secrets /run/secrets.d /run/secrets-for-users /run/secrets-for-users.d
+    '';
+  };
+
 in
 {
   options.sops = {
@@ -75,6 +90,28 @@ in
     _generatedNixosModules = lib.mapAttrs
       (name: member: [ (mkSopsNixosModule name member) ])
       config.members;
+
+    # The teardown base decrypts nothing: sops.cleanup removed the secrets, and
+    # the switch back must not bring them again — not even the ones the user's
+    # own configuration or patches declare. Without the cluster's age key
+    # setting they could not be decrypted anyway.
+    _teardownNixosModules = lib.genAttrs (lib.attrNames config.members) (_: [
+      ({ lib, ... }: {
+        sops.secrets = lib.mkForce { };
+        sops.templates = lib.mkForce { };
+      })
+    ]);
+
+    teardown.steps = teardownLib.mkModuleSteps {
+      cluster = config;
+      module = "sops";
+      members = lib.attrNames config.members;
+      offset = 4;
+      cleanup = member: {
+        description = "Remove decrypted secrets from ${member} (the age key stays)";
+        run = teardownCleanup member;
+      };
+    };
 
     # converge preStep: materialize secrets before any member is installed.
     # Reuses the exact `sops gen` action builder (no duplicated logic).

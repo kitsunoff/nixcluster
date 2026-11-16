@@ -137,6 +137,7 @@
             nixosConfiguration = self.nixosConfigurations.base;
             install.ip = "192.168.1.10";
             install.mac = "aa:bb:cc:dd:ee:01";  # auto-provision by MAC
+            networking.hostName = "node1";
             install.disk = "/dev/sda";
             k3s.role = "server";
             # Storage: dedicated disks for LINSTOR

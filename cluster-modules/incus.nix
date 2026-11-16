@@ -159,6 +159,93 @@ let
     fi
   '';
 
+  # --- teardown ---------------------------------------------------------------
+  # The reverse of the Incus converge contract (lib/teardown.nix holds the
+  # shape): every instance is deleted, joiners leave the cluster through the
+  # bootstrap before the bootstrap leaves, then each host loses its Incus state.
+  teardownLib = import ../lib/teardown.nix { inherit lib; };
+  memberIp = member: config.members.${member}.install.ip or null;
+
+  # Deletes every instance the member can see. In a cluster that is every
+  # instance on the first member that answers; the others then find nothing.
+  # Best-effort: the state directory is removed in cleanup regardless, this only
+  # makes the instances stop cleanly first.
+  teardownInstancesOff = { pkgs, ... }:
+    pkgs.writeShellApplication {
+      name = "nixcluster-teardown-incus-instances-off";
+      text = lib.concatMapStringsSep "\n" (member: lib.getExe (teardownLib.mkHostStep {
+        inherit pkgs member;
+        name = "incus.instances-off";
+        ip = memberIp member;
+        script = ''
+          if command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1; then
+            incus list --all-projects --format csv --columns en | while IFS=, read -r project instance; do
+              [ -n "$instance" ] || continue
+              echo "deleting instance $instance (project $project)"
+              incus delete --force --project "$project" "$instance" ||
+                echo "could not delete $instance; its storage goes with the cleanup"
+            done
+          fi
+          true
+        '';
+      }) + " || true") incusMemberNames;
+    };
+
+  # A joiner is removed from the cluster ON the bootstrap — gracefully, or with
+  # --force when it is no longer online — and then stops Incus. The bootstrap
+  # is the last member: nothing is left to remove it from, it only stops.
+  teardownLeave = member: { pkgs, ... }:
+    let
+      name = config.memberRegistryNames.${member};
+      stop = teardownLib.mkHostStep {
+        inherit pkgs member;
+        name = "incus.leave";
+        ip = memberIp member;
+        script = "stop_unit incus.socket incus-user.socket incus.service incus-user.service";
+      };
+      deregister = teardownLib.mkHostStep {
+        inherit pkgs;
+        member = resolvedBootstrap;
+        name = "incus.leave-${member}";
+        ip = bootstrapIp;
+        script = ''
+          if incus cluster show ${lib.escapeShellArg name} >/dev/null 2>&1; then
+            incus cluster remove ${lib.escapeShellArg name} ||
+              incus cluster remove --force --yes ${lib.escapeShellArg name}
+          else
+            echo "${name} is not an Incus cluster member; nothing to remove"
+          fi
+        '';
+      };
+    in
+    pkgs.writeShellApplication {
+      name = "nixcluster-teardown-incus-leave-${member}";
+      text = ''
+        ${lib.optionalString (member != resolvedBootstrap) (lib.getExe deregister)}
+        exec ${lib.getExe stop}
+      '';
+    };
+
+  # Incus state on the host: every unit, the managed bridges (named incusbr*,
+  # the module's default) and the data, log and cache directories — including
+  # the dir-backed storage pool, which lives under /var/lib/incus.
+  teardownCleanup = member: { pkgs, ... }: teardownLib.mkHostStep {
+    inherit pkgs member;
+    name = "incus.cleanup";
+    ip = memberIp member;
+    script = ''
+      stop_unit incus.socket incus-user.socket incus.service incus-user.service \
+        incus-startup.service incus-preseed.service incus-instances-reconcile.service \
+        incus-lxcfs.service
+      for link in $(ip -oneline link show type bridge | awk -F': ' '{ print $2 }'); do
+        case "$link" in
+          incusbr*) ip link delete "$link" ;;
+        esac
+      done
+      remove_paths /var/lib/incus /var/log/incus /var/cache/incus
+    '';
+  };
+
   # CLI commands
   incusCommands = {
     status = {
@@ -545,6 +632,39 @@ in
         };
       })
     ];
+
+    # teardown DAG: converge in reverse (see the teardown section above).
+    # Without clustering there is nothing to leave: each member only loses its
+    # instances and its state.
+    teardown.steps = lib.mkIf (incusMemberNames != []) (
+      {
+        "incus.instances-off" = {
+          description = "Delete every Incus instance";
+          phase = "workloads";
+          priority = teardownLib.bands.workloads + 10;
+          run = teardownInstancesOff;
+        };
+      }
+      // teardownLib.mkModuleSteps ({
+        cluster = config;
+        module = "incus";
+        members = incusMemberNames;
+        offset = 1;
+        after = [ "incus.instances-off" ];
+        cleanup = member: {
+          description = "Remove Incus units, bridges and state from ${member}";
+          run = teardownCleanup member;
+        };
+      } // lib.optionalAttrs clusterEnabled {
+        leave = member: {
+          description =
+            if member == resolvedBootstrap
+            then "${member} (bootstrap) stops Incus last"
+            else "${member} leaves the Incus cluster and stops Incus";
+          run = teardownLeave member;
+        };
+      })
+    );
 
     # The Incus ordering contract: a joiner has no cluster to join until the
     # bootstrap member is up, but joiners do not depend on each other. State that

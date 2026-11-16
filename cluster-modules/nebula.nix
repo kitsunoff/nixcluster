@@ -202,6 +202,20 @@ let
     };
   };
 
+  # --- teardown ---------------------------------------------------------------
+  # Nebula holds no membership to leave: the lighthouse-less mesh has no
+  # registry. Each mesh member stops its network unit, which also removes the
+  # tun interface. Its certificates live under /run/secrets and go with the
+  # sops cleanup. See lib/teardown.nix for the shape.
+  teardownLib = import ../lib/teardown.nix { inherit lib; };
+
+  teardownCleanup = member: { pkgs, ... }: teardownLib.mkHostStep {
+    inherit pkgs member;
+    name = "nebula.cleanup";
+    ip = nebulaMembers.${member}.install.ip or null;
+    script = "stop_unit ${lib.escapeShellArg "nebula@${netName}.service"}";
+  };
+
 in
 {
   options.nebula = {
@@ -242,6 +256,17 @@ in
         run = nebulaCommands.gen-certs.builder;
       };
     };
+    teardown.steps = lib.mkIf (nebulaMemberNames != []) (teardownLib.mkModuleSteps {
+      cluster = config;
+      module = "nebula";
+      members = nebulaMemberNames;
+      offset = 3;
+      cleanup = member: {
+        description = "Stop the Nebula mesh on ${member}";
+        run = teardownCleanup member;
+      };
+    });
+
     converge.postSteps = lib.mkIf (nebulaMemberNames != []) {
       "nebula.up" = {
         description = "(Re)start Nebula on mesh nodes";
