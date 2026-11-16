@@ -115,10 +115,19 @@ in
 
     environment.systemPackages = [ pkgs.keepalived ];
 
-    # Allow the VRRP protocol (IP proto 112) through the firewall. extraCommands
-    # targets the default iptables firewall; document nftables setups separately.
-    networking.firewall.extraCommands = lib.mkAfter ''
-      iptables -I INPUT -p vrrp -j ACCEPT 2>/dev/null || true
-    '';
+    # Allow the VRRP protocol (IP proto 112) through the firewall, in the form
+    # the active firewall understands: nixpkgs rejects iptables extraCommands
+    # under nftables, which Incus turns on.
+    networking.firewall = if config.networking.nftables.enable
+      then {
+        extraInputRules = ''
+          ip protocol vrrp accept
+        '';
+      }
+      else {
+        extraCommands = lib.mkAfter ''
+          iptables -I INPUT -p vrrp -j ACCEPT 2>/dev/null || true
+        '';
+      };
   };
 }

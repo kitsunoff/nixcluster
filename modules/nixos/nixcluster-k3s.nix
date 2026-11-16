@@ -220,6 +220,8 @@ in
 
     networking.firewall = {
       allowedTCPPorts = [ 6443 2379 2380 10250 ];
+      # flannel's default VXLAN backend carries pod traffic between nodes.
+      allowedUDPPorts = [ 8472 ];
       trustedInterfaces = [ "cni0" "flannel.1" ];
     };
 

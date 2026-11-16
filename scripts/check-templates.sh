@@ -57,10 +57,12 @@ assert_eq() {
   fi
 }
 
-# eval_json <flake-dir> <attr-expr> — evaluate an attribute to compact JSON.
+# eval_json <flake-dir> <attr-expr> — evaluate an attribute to compact JSON, or
+# the evaluation error. stderr is kept out of a successful value: nix reports
+# progress there ("copying path ... from <substituter>" on a CI runner).
 eval_json() {
   local dir="$1" expr="$2"
-  "${NIX[@]}" eval --json "$dir#$expr" 2>&1
+  "${NIX[@]}" eval --json "$dir#$expr" 2>"$WORK_DIR/eval.err" || cat "$WORK_DIR/eval.err"
 }
 
 # ---------------------------------------------------------------------------
@@ -165,7 +167,7 @@ $("${NIX[@]}" eval --raw "$dir#apps.aarch64-linux.cluster-$cluster.program" 2>&1
   # 3b. the resolved converge order must exist — this is what runs the
   # topological sort, so an unknown dependency or a cycle fails here by name.
   local order
-  order="$("${NIX[@]}" eval --json "$dir#clusterConfigurations.$cluster.convergeOrder" 2>&1)"
+  order="$(eval_json "$dir" "clusterConfigurations.$cluster.convergeOrder")"
   if [[ "$order" == \[* ]]; then
     ok "convergeOrder resolves: $(printf '%s' "$order" | tr -d '[]"' | tr ',' ' ')"
   else

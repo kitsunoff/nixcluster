@@ -42,6 +42,8 @@ in
         coreModule
         # Thread downstream flake inputs (consumed by e.g. pxe -> inputs.disko).
         { _inputs = inputs; }
+        # The downstream flake root, so modules can resolve files kept in it.
+        { _flakeRoot = self.outPath; }
         # Default the cluster name to its attribute key (nixcluster.<name>).
         ({ name, ... }: { name = lib.mkDefault name; })
       ];

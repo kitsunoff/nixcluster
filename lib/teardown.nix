@@ -22,6 +22,7 @@
 
 let
   stepPlan = import ./stepPlan.nix { inherit lib; };
+  sshLib = import ./ssh.nix { inherit lib; };
 in
 rec {
   # Priority bands. Phases are separated by `deps` where it matters and by these
@@ -113,7 +114,7 @@ rec {
         log() { echo "[${name}] ${member}: $*" >&2; }
 
         IP=${lib.escapeShellArg (if ip == null then "" else ip)}
-        SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes)
+        SSH_OPTS=(${sshLib.shellArgs} -o BatchMode=yes)
 
         if [[ -z "$IP" ]]; then
           log "no install.ip; skipped"

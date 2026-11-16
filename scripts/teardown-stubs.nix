@@ -73,7 +73,7 @@ let
 
   stubNix = pkgs.writeShellScriptBin "nix" ''
     ${unreachableCheck}
-    printf '%s\n' "nix $*" >> "$STUB_CALLS"
+    printf '%s\n' "nix $*''${NIX_SSHOPTS:+ NIX_SSHOPTS=$NIX_SSHOPTS}" >> "$STUB_CALLS"
     case "$*" in
       *' build '*)
         member=""

@@ -18,9 +18,17 @@ Describe a cluster once — members, roles, modules — and `converge` installs 
 
 > [!WARNING]
 > First-time provisioning runs `nixos-anywhere`, which **wipes the target disk**.
-> `converge` decides install-vs-switch by probing `/run/current-system` over SSH, so
-> a host you did not mean to include is a host you may destroy. Check every
-> `install.ip` and `install.disk` before the first run.
+> `converge` decides install-vs-switch by probing the host over SSH: NixOS with a
+> `/run/current-system` is switched, anything else — including a host still in
+> the NixOS installer after an interrupted install — is installed. A host you did
+> not mean to include is a host you may destroy. Check every `install.ip` and
+> `install.disk` before the first run.
+
+> [!IMPORTANT]
+> A host needs **at least 3 GiB of RAM** to be installed. nixos-anywhere boots a
+> kexec installer that unpacks into memory; with 2 GiB it fails with
+> `kexec_file_load failed: Out of memory`. A smaller host can be installed by
+> giving it more memory for the install only.
 
 > [!IMPORTANT]
 > Removing a member from the cluster definition now **removes it from the
@@ -107,7 +115,16 @@ and does not care about agents; and pruning happens last, once the desired membe
 have converged.
 
 A step whose dependency did not succeed is **skipped**, not run — a failed
-bootstrap does not drag the agents through a pointless join attempt.
+bootstrap does not drag the agents through a pointless join attempt. A member
+that fails to install or switch counts as a failed step the same way.
+
+An install is bounded by `converge.installTimeoutSeconds` (default 3600):
+nixos-anywhere can wait forever for a host that does not seem to go down after
+kexec, and the timeout turns that into a failed member instead of a stuck run.
+After the install, converge waits (`converge.rebootTimeoutSeconds`, default
+900) until the member answers SSH again with `/run/current-system` on the
+system it just installed, so the steps after it — joining a cluster, fetching
+a kubeconfig — do not run against a rebooting host.
 
 `preSteps` / `postSteps` still exist as sugar over the same attrset, carrying the
 dependencies their names implied.
@@ -171,8 +188,8 @@ Nothing is auto-applied: a cluster imports what it wants.
 | Module | What it adds |
 | --- | --- |
 | `k3s` | k3s on every member, roles from `k3s.role`, the ordering contract above, kubeconfig fetch, node/manifest/helm commands, and a prune step |
-| `incus` | Incus on every member; with `incus.cluster.enable`, runtime join tokens for members that never set a per-member patch, plus a prune step |
-| `sops` | age-encrypted cluster secrets, generate-if-missing, delivered to hosts outside the Nix store |
+| `incus` | Incus on every member; with `incus.cluster.enable`, runtime join tokens for members that never set a per-member patch, plus a prune step. `incus.virtualMachines = false` runs containers only and keeps qemu and the UEFI firmware out of the closure (for hosts without nested KVM) |
+| `sops` | age-encrypted cluster secrets, generate-if-missing (a run with nothing missing leaves the file untouched), delivered to hosts outside the Nix store. Members decrypt `secrets/<cluster>.yaml` from the flake (`sops.secretsFile`; commit the file so the flake contains it) |
 | `nebula` | a Nebula mesh with a per-cluster CA and per-member certificates |
 | `keepalived` | VRRP virtual addresses across members |
 | `disko` | declarative partitioning for the install step |
@@ -215,6 +232,10 @@ nix run .#cluster-prod -- gen-config 10.0.0.12  # SSH-discover a node, emit a me
 nix run .#cluster-prod -- k3s nodes             # module command groups
 ```
 
+`--dry-run` walks the whole plan without touching a host: every step and member
+is reported as `skipped` with the message `dry-run`, and the result is
+`success`.
+
 `converge` and `teardown` write human output to stderr and exactly one machine-readable line to
 stdout, so a consumer gets a single marker to grep:
 
@@ -222,12 +243,32 @@ stdout, so a consumer gets a single marker to grep:
 ::nixcluster:result:: {"cluster":"prod","result":"success","members":[
   {"name":"node-1","ip":"10.0.0.11","action":"switch","status":"Applied","durationSeconds":47},
   {"name":"old-node","ip":"","action":"removed","status":"Applied","message":"removed from the k3s registry (unreachable)"}],
-  "steps":[{"name":"sops.gen","phase":"pre","status":"ok"},{"name":"k3s.prune","phase":"post","status":"ok"}]}
+  "steps":[{"name":"sops.gen","phase":"pre","status":"ok"},{"name":"member-node-1","phase":"member","status":"ok"},
+  {"name":"k3s.prune","phase":"post","status":"ok"}]}
 ```
+
+With `--json`, stdout is the bare object instead, and the marker line moves to
+stderr: a consumer that reads stdout gets plain JSON, and one that greps the
+combined log (a Kubernetes Job's pod log, for example) still finds the marker.
+
+`steps` lists every step in the order it ran, the `member-<name>` steps
+included; `members` adds the per-member detail (action, address, duration).
+
+### SSH
+
+Every command reaches members with one set of ssh options (`lib/ssh.nix`): no
+host-key checking and nothing written to `known_hosts` (a reinstall changes the
+host key), `LogLevel=ERROR`, a 10-second connect timeout, and a client config
+that includes only `~/.ssh/config`. The system-wide `/etc/ssh/ssh_config` is
+skipped on purpose: it is written for the host's ssh, and an option the Nix
+store's ssh does not support (`GSSAPIAuthentication` on most distributions)
+prints an error on every connection. Put anything nixcluster's ssh needs, such
+as a `ProxyJump`, in `~/.ssh/config`. `gen-config` is the exception: it pins the
+host key of a machine it sees for the first time.
 
 ## Checks
 
-All three run in CI on every push and pull request. None of them builds a NixOS
+All of them run in CI on every push and pull request. None of them builds a NixOS
 system or touches a host.
 
 ```text
@@ -238,7 +279,13 @@ $ scripts/check-prune.sh
 38 check(s) passed, 0 failed
 
 $ scripts/check-teardown.sh
-88 check(s) passed, 0 failed
+99 check(s) passed, 0 failed
+
+$ scripts/check-modules.sh
+17 check(s) passed, 0 failed
+
+$ scripts/check-converge.sh
+50 check(s) passed, 0 failed
 ```
 
 `check-templates.sh` locks every registered template against the checkout and
@@ -261,6 +308,22 @@ surviving the switch back, and the real `teardown` command against stubbed
 `ssh`, `kubectl` and `nix` — the `yes` prompt and every refusal, `--dry-run`,
 `--auto-approve`, an unreachable member, a member that fails to switch, and the
 result JSON.
+
+`check-modules.sh` evaluates the NixOS side of the modules in combination: a
+fixture flake (`scripts/fixtures/modules`) loads them the way a real cluster
+does (k3s, Incus, sops and keepalived together; Incus without VMs), and the
+script asserts what each member's configuration ends up with: the secrets file,
+the firewall backend and its VRRP rule, the ports between members, and which
+units reference the VM tooling.
+
+`check-converge.sh` runs the real `converge` command of a k3s + Incus cluster
+against stubbed `ssh`, `nixos-anywhere`, `nixos-rebuild`, `nix` and `kubectl`:
+each member is a directory standing in for its root file system, so the probe
+converge sends decides install or switch exactly as it would on a host. It
+covers switching, installing, a host left in the kexec installer, a failed and
+a hanging install, waiting for the member to come back (or not, or on another
+system), `--json`, `--dry-run`, the shared ssh options, and that `sops gen`
+leaves the secrets file alone when nothing is missing.
 
 ## Architecture
 
@@ -303,6 +366,10 @@ gives every module the same four teardown phases for the same reason.
   covered by evaluation and by stubbed tests only.
 - **Teardown fully resets only the default `dir` Incus storage pool.** Pools on
   zfs, lvm or btrfs with a block-device source are not wiped.
+- **nixos-anywhere uses its own ssh options.** The shared options in
+  `lib/ssh.nix` cover every ssh, scp, `nix copy` and `nixos-rebuild` call, but
+  nixos-anywhere builds its ssh command line itself, so it still reads the
+  system-wide `ssh_config` during an install.
 - **Teardown keeps member patches.** A patch that configures a service
   directly (for example `services.k3s.*` instead of the module's `k3s.*`
   options) stays active after teardown.

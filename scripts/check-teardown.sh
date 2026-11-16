@@ -113,6 +113,22 @@ $(indent "$STUB_CALLS")"
   fi
 }
 
+# expect_every_ssh_call <what>: every recorded ssh/scp invocation (and every
+# NIX_SSHOPTS handed to nix or nixos-rebuild) uses nixcluster's shared ssh
+# options: no host-key prompt or banner, no known_hosts entry, and the
+# system-wide ssh_config skipped (its options can be unsupported by this ssh).
+expect_every_ssh_call() {
+  local bad
+  bad="$(grep --extended-regexp '^(ssh|scp) |NIX_SSHOPTS=' "$STUB_CALLS" | grep --invert-match --extended-regexp \
+    -e '-F /nix/store/[a-z0-9]+-nixcluster-ssh-config .*StrictHostKeyChecking=no .*UserKnownHostsFile=/dev/null .*LogLevel=ERROR' || true)"
+  if [[ -z "$bad" ]] && grep --quiet --extended-regexp '^(ssh|scp) ' "$STUB_CALLS"; then
+    ok "$1"
+  else
+    fail "$1; calls without the shared options:
+$(printf '%s\n' "$bad" | sed 's/^/        /')"
+  fi
+}
+
 # result_json: the payload of the single ::nixcluster:result:: line on stdout.
 result_json() {
   local line
@@ -181,8 +197,10 @@ printf '\n==> Part A: what a member is switched back to\n'
 # disko NixOS module. Its base configuration must keep the disk layout (the
 # host has to boot from the same disk afterwards) and drop the cluster.
 base_eval() {
-  "${NIX[@]}" eval --json "path:$REPO_ROOT#clusterConfigurations.dev.$1" ${2:+--apply "$2"} 2>&1 ||
-    echo "<eval failed>"
+  # stderr stays out of the compared value: nix reports substituter progress there.
+  "${NIX[@]}" eval --json "path:$REPO_ROOT#clusterConfigurations.dev.$1" ${2:+--apply "$2"} \
+    2>"$WORK_DIR/eval.err" ||
+    echo "<eval failed: $(tail -n 3 "$WORK_DIR/eval.err" | tr '\n' ' ')>"
 }
 DISKS='d: builtins.mapAttrs (_: v: v.device) d'
 expect_eq "the disk layout survives teardown" \
@@ -280,6 +298,9 @@ expect_eq "every member is planned for destruction, not destroyed" \
   "$(jq_result '[.members[] | "\(.name):\(.action):\(.status):\(.message)"] | sort | join(" ")')"
 expect_eq "every step is skipped as dry-run" "true" \
   "$(jq_result '(.steps | length) > 0 and (.steps | all(.status == "skipped" and .message == "dry-run"))')"
+expect_eq "a plan is a success, not a partial run" "success" "$(jq_result '.result')"
+expect_eq "the plan reports the member steps too" "member-node-1 member-node-2 member-node-3 member-node-4" \
+  "$(jq_result '[.steps[] | select(.phase == "member") | .name] | sort | join(" ")')"
 
 printf '\n  "yes" proceeds\n'
 run_teardown $'yes\n'
@@ -312,6 +333,7 @@ expect_absent "the age key is kept, so a later converge can decrypt again" "$STU
 expect_contains "the base configuration is built" "$STUB_CALLS" 'teardownNixosConfigurations."node-1"'
 expect_contains "and copied to the member" "$STUB_CALLS" "copy --to ssh://root@10.0.0.1"
 expect_contains "and switched to" "$STUB_CALLS" "bin/switch-to-configuration switch"
+expect_every_ssh_call "every ssh and nix copy uses the shared ssh options"
 expect_before "the agent leaves before the bootstrap" "$STUB_CALLS" "drain node-4" "copy --to ssh://root@10.0.0.4"
 expect_all_before "every Incus joiner is removed before any cleanup" "$STUB_CALLS" "incus cluster remove" "remove_paths /etc/rancher"
 expect_before "members are switched back last-converged first" "$STUB_CALLS" "copy --to ssh://root@10.0.0.4" "copy --to ssh://root@10.0.0.1"
@@ -324,12 +346,17 @@ expect_eq "cluster name" "lab" "$(jq_result '.cluster')"
 expect_eq "member keys" '["action","durationSeconds","ip","message","name","status"]' \
   "$(jq_result '[.members[] | keys] | unique | .[0]')"
 expect_eq "step keys" '["message","name","phase","status"]' "$(jq_result '[.steps[] | keys] | unique | .[0]')"
-expect_eq "steps are reported in plan order" \
-  "$(printf '%s' "${EXPECTED_ORDER:-}" | tr '\n' ' ' | sed 's/ member-node-[0-9]//g')" \
+expect_eq "steps are reported in plan order, member steps included" \
+  "$(printf '%s' "${EXPECTED_ORDER:-}" | tr '\n' ' ')" \
   "$(jq_result '.steps | map(.name) | join(" ")')"
+expect_eq "a member step carries the member phase" "member:ok" \
+  "$(jq_result '.steps[] | select(.name == "member-node-1") | "\(.phase):\(.status)"')"
 run_teardown "" --auto-approve --json
 expect_eq "--json: stdout is the bare object" "lab" "$(head -n 1 "$OUT" | "${JQ[@]}" --raw-output '.cluster')"
 expect_eq "--json: and only that" 1 "$(wc -l < "$OUT" | tr -d ' ')"
+expect_eq "--json: the marker line still reaches the log (stderr) for greppers" \
+  "$(head -n 1 "$OUT")" \
+  "$(sed -n 's/^::nixcluster:result:: //p' "$ERR")"
 
 printf '\n  an unreachable member is reported, not fatal\n'
 printf '10.0.0.3\n' > "$STUB_UNREACHABLE"
@@ -338,6 +365,8 @@ expect_eq "exits 0" 0 "$RC"
 expect_eq "result is partial" "partial" "$(jq_result '.result')"
 expect_eq "the unreachable member is skipped and says why" "destroyed:Skipped:true" \
   "$(jq_result '.members[] | select(.name == "node-3") | "\(.action):\(.status):\(.message | test("unreachable"))"')"
+expect_eq "its member step says it was skipped" "skipped" \
+  "$(jq_result '.steps[] | select(.name == "member-node-3") | .status')"
 expect_eq "the others are destroyed" "node-1:Applied node-2:Applied node-4:Applied" \
   "$(jq_result '[.members[] | select(.name != "node-3") | "\(.name):\(.status)"] | sort | join(" ")')"
 expect_contains "the log names it" "$ERR" "unreachable"
@@ -351,6 +380,8 @@ expect_eq "exits 1" 1 "$RC"
 expect_eq "result is failed" "failed" "$(jq_result '.result')"
 expect_eq "the member is reported as failed" "destroyed:Failed" \
   "$(jq_result '.members[] | select(.name == "node-2") | "\(.action):\(.status)"')"
+expect_eq "and so is its member step" "failed" \
+  "$(jq_result '.steps[] | select(.name == "member-node-2") | .status')"
 expect_eq "the others are still destroyed" "node-1:Applied node-3:Applied node-4:Applied" \
   "$(jq_result '[.members[] | select(.name != "node-2") | "\(.name):\(.status)"] | sort | join(" ")')"
 : > "$STUB_NIX_FAIL"

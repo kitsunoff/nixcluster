@@ -16,6 +16,7 @@
 
 let
   stepPlan = import ./stepPlan.nix { inherit lib; };
+  sshLib = import ./ssh.nix { inherit lib; };
 
   clusterName = cluster.name;
   memberNames = lib.attrNames cluster.members;
@@ -55,7 +56,7 @@ let
         deps = lib.concatStringsSep " " (map lib.escapeShellArg step.deps);
       in
       if step.member != null
-      then ''run_member_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.member} ${deps}''
+      then ''run_member_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} ${lib.escapeShellArg step.member} ${deps}''
       else ''run_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} ${lib.escapeShellArg (lib.getExe (step.run { inherit pkgs lib cluster helpers; }))} ${deps}'')
     order;
 
@@ -63,22 +64,25 @@ let
   # `member_action <member>` + MEMBER_SKIP_ACTION to be defined before the walk.
   stepRunner = ''
             # All human output goes to stderr; stdout carries ONLY the result
-            # line so `--json` yields a bare object and greppers get one marker.
+            # line so `--json` yields a bare object and greppers get one marker
+            # (on stderr under --json, see emit_result).
             log() { echo "$@" >&2; }
 
             # --- accumulators (built with jq; never hand-concatenated) ---------
             MEMBERS_JSON='[]'
             STEPS_JSON='[]'
 
-            # Outcome of every step by name ("ok" | "failed" | "skipped"), so a
-            # step whose dependency did not succeed is skipped instead of run.
+            # Outcome of every step by name ("ok" | "planned" | "failed" |
+            # "skipped"), so a step whose dependency did not succeed is skipped
+            # instead of run. "planned" is a dry-run step: it did not run, but
+            # it would have, so the steps after it are planned too.
             declare -A STEP_STATUS=()
 
             # Echoes the first dependency that did not succeed, if any.
             failed_dep() {
               local dep
               for dep in "$@"; do
-                if [[ "''${STEP_STATUS[$dep]:-missing}" != "ok" ]]; then
+                if [[ ! "''${STEP_STATUS[$dep]:-missing}" =~ ^(ok|planned)$ ]]; then
                   echo "$dep"
                   return 0
                 fi
@@ -100,12 +104,10 @@ let
                 <<<"$STEPS_JSON")
             }
 
-            # No host-key pinning on the converge path: converge reinstalls
-            # members (nixos-anywhere), which CHANGES their ssh host key mid-run,
-            # so accept-new (which rejects a *changed* key) would fail every
-            # post-install step. Matches the operator-injected NIX_SSHOPTS, which
-            # also disables host-key checking for exactly this reason.
-            SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+            # The ssh options every step shares (lib/ssh.nix): no host-key
+            # pinning, because converge reinstalls members (nixos-anywhere),
+            # which CHANGES their ssh host key mid-run.
+            SSH_OPTS=(${sshLib.shellArgs})
 
             # The operator passes the cluster SSH key via NIX_SSHOPTS ("-i <path>
             # ..."), but plain ssh (the member probe below) and the module steps
@@ -176,7 +178,7 @@ let
               if [[ "$DRY_RUN" -eq 1 ]]; then
                 log "  [step:$phase] $name (dry-run, not executed)"
                 add_step "$name" "$phase" skipped "dry-run"
-                STEP_STATUS[$name]=skipped
+                STEP_STATUS[$name]=planned
                 return 0
               fi
               log "=== step [$phase] $name ==="
@@ -200,32 +202,43 @@ let
 
             # A member step: skip when a dependency failed, otherwise run the
             # command's member action and record the outcome under the STEP name
-            # so dependents can gate on it.
-            run_member_step() { # step-name member [deps...]
-              local name="$1" member="$2"
-              shift 2
-              local blocker
+            # so dependents can gate on it. The step joins the steps array like
+            # any other; its status follows the member entry the action wrote.
+            run_member_step() { # step-name phase member [deps...]
+              local name="$1" phase="$2" member="$3"
+              shift 3
+              local blocker entry
               if blocker=$(failed_dep "$@"); then
                 log "  [member] $member skipped (dependency '$blocker' did not succeed)"
                 add_member "$member" "$(member_ip "$member")" "$MEMBER_SKIP_ACTION" Skipped \
                   "dependency '$blocker' did not succeed" 0
+                add_step "$name" "$phase" skipped "dependency '$blocker' did not succeed"
                 STEP_STATUS[$name]=skipped
                 return 0
               fi
               if member_action "$member"; then
-                STEP_STATUS[$name]=ok
+                if [[ "$DRY_RUN" -eq 1 ]]; then STEP_STATUS[$name]=planned; else STEP_STATUS[$name]=ok; fi
               else
                 STEP_STATUS[$name]=failed
               fi
+              entry=$(jq -c --arg m "$member" 'map(select(.name == $m)) | last // {}' <<<"$MEMBERS_JSON")
+              case "$(jq -r '.status // ""' <<<"$entry")" in
+                Applied) add_step "$name" "$phase" ok "" ;;
+                Skipped) add_step "$name" "$phase" skipped "$(jq -r '.message' <<<"$entry")" ;;
+                *) add_step "$name" "$phase" failed "$(jq -r '.message // "member action failed"' <<<"$entry")" ;;
+              esac
             }
 
             # Emits the single result line and sets RESULT. The overall result
             # comes from the accumulated members and steps unless one is given.
+            # A dry run that planned everything is a success: everything it
+            # reports as skipped was skipped on purpose.
             emit_result() { # [result]
               RESULT="''${1:-}"
               if [[ -z "$RESULT" ]]; then
-                RESULT=$(jq -rn --argjson m "$MEMBERS_JSON" --argjson s "$STEPS_JSON" '
+                RESULT=$(jq -rn --argjson m "$MEMBERS_JSON" --argjson s "$STEPS_JSON" --argjson dry "$DRY_RUN" '
                   if ($m | any(.status=="Failed")) or ($s | any(.status=="failed")) then "failed"
+                  elif $dry == 1 then "success"
                   elif ($m | any(.status=="Skipped")) or ($s | any(.status=="skipped")) then "partial"
                   else "success" end')
               fi
@@ -236,8 +249,12 @@ let
                 '{cluster:$cluster,result:$result,members:$members,steps:$steps}')
 
               log ""
+              # --json keeps stdout a bare object for `jq`; the marker line
+              # then goes to the log (stderr) instead, so a consumer that
+              # greps the combined output for it finds it either way.
               if [[ "$JSON" -eq 1 ]]; then
                 printf '%s\n' "$final"
+                log "::nixcluster:result:: $final"
               else
                 printf '::nixcluster:result:: %s\n' "$final"
               fi
@@ -435,7 +452,7 @@ let
         in
         pkgs.writeShellApplication {
           name = "nixclusterctl-${clusterName}-converge";
-          runtimeInputs = with pkgs; [ nixos-anywhere nixos-rebuild openssh jq coreutils ];
+          runtimeInputs = with pkgs; [ nixos-anywhere nixos-rebuild nix openssh jq coreutils ];
           text = ''
             set -euo pipefail
 
@@ -475,15 +492,90 @@ let
             MEMBER_SKIP_ACTION=noop
             member_action() { converge_member "$1"; }
 
+            # What a member is, decided on the member:
+            #   INSTALLER  the NixOS installer — what nixos-anywhere's kexec
+            #              image runs, so an install that was interrupted after
+            #              kexec. It has a /run/current-system of its own, so it
+            #              must be recognised before that test. Same rule as
+            #              nixos-anywhere: VARIANT_ID=installer in os-release.
+            #   INSTALLED  NixOS, so it is switched
+            #   FRESH      anything else, so it is installed (disk wiped)
+            # shellcheck disable=SC2016
+            MEMBER_PROBE='if grep -Eq '"'"'^VARIANT_ID="?installer"?$'"'"' /etc/os-release 2>/dev/null; then echo INSTALLER; elif test -e /run/current-system; then echo INSTALLED; else echo FRESH; fi'
+
+            # Bounded: nixos-anywhere can hang forever after kexec waiting for
+            # the host to go down. timeout exits 124 when it stops it.
+            INSTALL_TIMEOUT=${toString cluster.converge.installTimeoutSeconds}
+
+            REBOOT_TIMEOUT=${toString cluster.converge.rebootTimeoutSeconds}
+            NIX_FLAGS=(--extra-experimental-features "nix-command flakes")
+
+            # After an install the member reboots into its new system;
+            # nixos-anywhere returns before it is back. Waits until it answers
+            # SSH with /run/current-system on the expected system. Sets SEEN to
+            # what it last reported.
+            wait_for_member() { # ip expected-system
+              local ip="$1" expected="$2" deadline now
+              deadline=$(( $(date +%s) + REBOOT_TIMEOUT ))
+              SEEN=""
+              while :; do
+                SEEN=$(ssh "''${SSH_OPTS[@]}" -o BatchMode=yes "root@$ip" 'readlink -f /run/current-system' \
+                  </dev/null 2>/dev/null || true)
+                [[ "$SEEN" == "$expected" ]] && return 0
+                now=$(date +%s)
+                (( now < deadline )) || return 1
+                sleep $(( deadline - now < 5 ? deadline - now : 5 ))
+              done
+            }
+
+            install_member() { # member ip start
+              local member="$1" ip="$2" start="$3" end rc=0 expected
+              log "=== install $member ($ip) [nixos-anywhere, at most ''${INSTALL_TIMEOUT}s] ==="
+              timeout --kill-after=30 "$INSTALL_TIMEOUT" \
+                nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}" || rc=$?
+              end=$(date +%s)
+              case "$rc" in
+                0) ;;
+                124|137)
+                  log "  [member] $member: nixos-anywhere timed out after ''${INSTALL_TIMEOUT}s"
+                  add_member "$member" "$ip" install Failed "nixos-anywhere timed out after ''${INSTALL_TIMEOUT}s" $((end - start))
+                  return 1 ;;
+                *)
+                  add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
+                  return 1 ;;
+              esac
+
+              # nixos-anywhere just built it, so this is a lookup, not a build.
+              if ! expected=$(nix "''${NIX_FLAGS[@]}" build --no-link --print-out-paths \
+                ".#nixosConfigurations.\"${clusterName}-$member\".config.system.build.toplevel"); then
+                end=$(date +%s)
+                add_member "$member" "$ip" install Failed "installed, but its system path could not be resolved" $((end - start))
+                return 1
+              fi
+              log "  [member] $member: waiting up to ''${REBOOT_TIMEOUT}s for it to come back on $expected"
+              if ! wait_for_member "$ip" "$expected"; then
+                end=$(date +%s)
+                if [[ -z "$SEEN" ]]; then
+                  add_member "$member" "$ip" install Failed "installed, but did not come back over SSH within ''${REBOOT_TIMEOUT}s" $((end - start))
+                else
+                  add_member "$member" "$ip" install Failed "installed, but it runs $SEEN instead of $expected" $((end - start))
+                fi
+                return 1
+              fi
+              log "  [member] $member is back on $expected"
+              end=$(date +%s)
+              add_member "$member" "$ip" install Applied "" $((end - start))
+            }
+
             # Installs or switches one member. Returns non-zero only when the
-            # member genuinely failed to converge (a dry-run is not a failure).
+            # member genuinely failed to converge; a dry run plans it.
             converge_member() { # member
               local member="$1" ip probe start end
               ip="$(member_ip "$member")"
               if [[ "$DRY_RUN" -eq 1 ]]; then
                 log "  [member] $member -> ''${ip:-<no-ip>} (dry-run, not probed)"
                 add_member "$member" "$ip" noop Skipped "dry-run" 0
-                return 1
+                return 0
               fi
               if [[ -z "$ip" ]]; then
                 log "  [member] $member has no install.ip; skipping"
@@ -491,10 +583,15 @@ let
                 return 1
               fi
               start=$(date +%s)
-              probe=$(ssh "''${SSH_OPTS[@]}" "root@$ip" \
-                'test -e /run/current-system && echo INSTALLED || echo FRESH' 2>/dev/null \
+              # The probe is a fixed script, meant to be sent as it is.
+              # shellcheck disable=SC2029
+              probe=$(ssh "''${SSH_OPTS[@]}" "root@$ip" "$MEMBER_PROBE" 2>/dev/null \
                 || echo UNREACHABLE)
               case "$probe" in
+                INSTALLER)
+                  log "  [member] $member ($ip) is running the NixOS installer (an interrupted install?)"
+                  install_member "$member" "$ip" "$start"
+                  ;;
                 INSTALLED)
                   log "=== switch $member ($ip) [nixos-rebuild] ==="
                   # nixos-rebuild reads its ssh options ONLY from NIX_SSHOPTS, not
@@ -505,18 +602,15 @@ let
                     end=$(date +%s); add_member "$member" "$ip" switch Applied "" $((end - start))
                   else
                     end=$(date +%s); add_member "$member" "$ip" switch Failed "nixos-rebuild switch failed" $((end - start))
+                    return 1
                   fi
                   ;;
                 FRESH)
-                  log "=== install $member ($ip) [nixos-anywhere] ==="
-                  if nixos-anywhere --flake ".#${clusterName}-$member" --target-host "root@$ip" "''${EF_ARGS[@]}"; then
-                    end=$(date +%s); add_member "$member" "$ip" install Applied "" $((end - start))
-                  else
-                    end=$(date +%s); add_member "$member" "$ip" install Failed "nixos-anywhere failed" $((end - start))
-                  fi
+                  install_member "$member" "$ip" "$start"
                   ;;
                 *)
                   end=$(date +%s); add_member "$member" "$ip" noop Failed "unreachable ($probe)" $((end - start))
+                  return 1
                   ;;
               esac
             }
@@ -535,7 +629,7 @@ let
             # Reflect a hard convergence failure in the exit code so a consumer
             # driving converge as a Job (NIO's converge NixCronJob) sees the run
             # fail instead of silently succeeding. "partial" (only Skipped, e.g.
-            # dry-run or an absent optional step) is NOT a failure.
+            # an unreachable member) is NOT a failure.
             if [[ "$RESULT" == "failed" ]]; then
               exit 1
             fi
@@ -574,7 +668,7 @@ let
             (name:
               let step = steps.${name}; in
               if step.member != null
-              then ''add_member ${lib.escapeShellArg step.member} "$(member_ip ${lib.escapeShellArg step.member})" destroyed Skipped dry-run 0''
+              then ''add_member ${lib.escapeShellArg step.member} "$(member_ip ${lib.escapeShellArg step.member})" destroyed Skipped dry-run 0; add_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} skipped dry-run''
               else ''add_step ${lib.escapeShellArg name} ${lib.escapeShellArg step.phase} skipped dry-run'')
             stepOrder;
 

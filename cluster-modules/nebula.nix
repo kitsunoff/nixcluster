@@ -19,6 +19,9 @@
 { lib, config, ... }:
 
 let
+  # The ssh options every nixcluster command shares (lib/ssh.nix).
+  sshLib = import ../lib/ssh.nix { inherit lib; };
+
   cfg = config.nebula;
   clusterName = config.name;
 
@@ -59,8 +62,7 @@ let
       # changes their ssh host key mid-run, so accept-new would reject the
       # post-install connection. nebula.up runs as a converge postStep. Uses the
       # cluster identity installed by the converge preamble (~/.ssh/id_ed25519).
-      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=5 "root@$ip" "$@"
+      ssh ${sshLib.shellArgs} "root@$ip" "$@"
     }
   '';
 

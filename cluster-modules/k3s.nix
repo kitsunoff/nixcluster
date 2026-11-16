@@ -3,6 +3,9 @@
 { lib, config, options, ... }:
 
 let
+  # The ssh options every nixcluster command shares (lib/ssh.nix).
+  sshLib = import ../lib/ssh.nix { inherit lib; };
+
   cfg = config.k3s;
   clusterName = config.name;
 
@@ -98,7 +101,7 @@ let
       exit 0
     fi
 
-    SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes)
+    SSH_OPTS=(${sshLib.shellArgs} -o BatchMode=yes)
 
     # A departing node's address is not in the cluster definition any more; the
     # Node object still has it.
@@ -266,7 +269,7 @@ let
               fetch)
                 mkdir -p "$(dirname "$KUBECONFIG_FILE")"
                 echo "Fetching kubeconfig from ${toString firstServerIp}..."
-                scp -o StrictHostKeyChecking=no "root@${toString firstServerIp}:/etc/rancher/k3s/k3s.yaml" "$KUBECONFIG_FILE.tmp"
+                scp ${sshLib.shellArgs} "root@${toString firstServerIp}:/etc/rancher/k3s/k3s.yaml" "$KUBECONFIG_FILE.tmp"
                 sed "s/127.0.0.1/${toString firstServerIp}/g" "$KUBECONFIG_FILE.tmp" > "$KUBECONFIG_FILE"
                 rm "$KUBECONFIG_FILE.tmp"
                 chmod 600 "$KUBECONFIG_FILE"
