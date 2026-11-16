@@ -48,16 +48,22 @@ chmod -R u+w "$FLAKE"
     "${NIX[@]}" flake lock --override-input nixcluster "path:$REPO_ROOT"
 )
 
+# eval_json <nix eval args...>: the value as JSON, or the last lines of the
+# evaluation error. stderr stays out of the value: nix reports progress there
+# ("copying path ... from <substituter>" on a CI runner with a binary cache).
+eval_json() {
+  local out
+  if out="$("${NIX[@]}" eval --json "$@" 2>"$WORK_DIR/eval.err")"; then
+    printf '%s' "$out"
+  else
+    printf '<eval failed: %s>' "$(grep --invert-match '^ *… ' "$WORK_DIR/eval.err" | tail -n 3 | tr '\n' ' ')"
+  fi
+}
+
 # member_eval <cluster-member> <option-path> [apply]: a member's option as JSON,
 # or the last lines of the evaluation error.
 member_eval() {
-  local out
-  if out="$("${NIX[@]}" eval --json "path:$FLAKE#nixosConfigurations.\"$1\".config.$2" \
-    ${3:+--apply "$3"} 2>&1)"; then
-    printf '%s' "$out"
-  else
-    printf '<eval failed: %s>' "$(printf '%s' "$out" | grep --invert-match '^ *… ' | tail -n 3 | tr '\n' ' ')"
-  fi
+  eval_json "path:$FLAKE#nixosConfigurations.\"$1\".config.$2" ${3:+--apply "$3"}
 }
 
 printf '==> sops\n'
@@ -120,11 +126,11 @@ expect_eq "the containers-only member still evaluates" "true" \
   "$(member_eval lite-node-1 system.build.toplevel.drvPath 'p: builtins.isString p')"
 expect_eq "and still runs Incus" "true" "$(member_eval lite-node-1 virtualisation.incus.enable)"
 expect_eq "a VM instance on a containers-only member is refused" "true" \
-  "$("${NIX[@]}" eval --json "path:$FLAKE#nixosConfigurations.\"lite-node-1\"" --apply '
+  "$(eval_json "path:$FLAKE#nixosConfigurations.\"lite-node-1\"" --apply '
     c: let e = c.extendModules { modules = [ {
       incus.instances.vm = { node = "node-1"; type = "virtual-machine"; image = "images:debian/12"; };
     } ]; };
-    in builtins.any (x: !x.assertion && builtins.match ".*virtualMachines.*" x.message != null) e.config.assertions' 2>&1)"
+    in builtins.any (x: !x.assertion && builtins.match ".*virtualMachines.*" x.message != null) e.config.assertions')"
 
 printf '\n%d check(s) passed, %d failed\n' "$checks" "$failures"
 [[ "$failures" -eq 0 ]]

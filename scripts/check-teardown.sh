@@ -197,8 +197,10 @@ printf '\n==> Part A: what a member is switched back to\n'
 # disko NixOS module. Its base configuration must keep the disk layout (the
 # host has to boot from the same disk afterwards) and drop the cluster.
 base_eval() {
-  "${NIX[@]}" eval --json "path:$REPO_ROOT#clusterConfigurations.dev.$1" ${2:+--apply "$2"} 2>&1 ||
-    echo "<eval failed>"
+  # stderr stays out of the compared value: nix reports substituter progress there.
+  "${NIX[@]}" eval --json "path:$REPO_ROOT#clusterConfigurations.dev.$1" ${2:+--apply "$2"} \
+    2>"$WORK_DIR/eval.err" ||
+    echo "<eval failed: $(tail -n 3 "$WORK_DIR/eval.err" | tr '\n' ' ')>"
 }
 DISKS='d: builtins.mapAttrs (_: v: v.device) d'
 expect_eq "the disk layout survives teardown" \
